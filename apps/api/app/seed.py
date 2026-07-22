@@ -82,7 +82,16 @@ async def seed() -> None:
             metadata_={"source": "demo_seed"},
             immutable_hash="seed:wf-client-brief",
         )
-        session.add_all([tenant, user, workflow, version, audit])
+        # Flush parent records in dependency order. The models intentionally keep
+        # tenant relationships lightweight, so SQLAlchemy cannot infer every FK
+        # insertion dependency from ORM relationships alone.
+        session.add(tenant)
+        await session.flush()
+        session.add(user)
+        await session.flush()
+        session.add(workflow)
+        await session.flush()
+        session.add_all([version, audit])
         await session.commit()
 
 

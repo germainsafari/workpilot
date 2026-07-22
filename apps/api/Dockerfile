@@ -8,6 +8,7 @@ COPY pyproject.toml ./
 COPY app ./app
 COPY alembic.ini ./
 COPY alembic ./alembic
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN pip install --no-cache-dir .
 
 EXPOSE 8000

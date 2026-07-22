@@ -63,8 +63,13 @@ async def create_run(
         await redis.rpush("workpilot:runs", json.dumps(await queue_payload(run.id, principal)))
     finally:
         await redis.aclose()
-    await session.refresh(run)
-    return run
+    created = await session.scalar(
+        select(WorkflowRun)
+        .where(WorkflowRun.id == run.id)
+        .options(selectinload(WorkflowRun.steps))
+        .execution_options(populate_existing=True)
+    )
+    return created or run
 
 
 @router.get("/runs", response_model=list[RunRead])
