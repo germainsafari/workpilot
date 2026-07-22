@@ -1,0 +1,10 @@
+node_modules
+node_modules.incomplete
+.git
+.next
+dist
+.wrangler
+apps/api/.venv
+apps/api/.pytest_cache
+apps/api/__pycache__
+apps/api/test-workpilot.db
