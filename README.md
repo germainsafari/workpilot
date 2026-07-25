@@ -54,6 +54,35 @@ Docker Compose supplies its own local-only database values. If you run services 
 
 Future Gmail, Drive, Slack, AWS, and model-provider phases will require provider-specific values, but they are intentionally not part of Phase 1.
 
+## Run against a managed Postgres (Neon)
+
+The control plane runs against any managed PostgreSQL. `app/db.py` normalizes
+libpq-style URLs (`sslmode`, `channel_binding`) so a Neon/RDS/Supabase string
+works directly. To point the API at Neon and load the full demo workspace:
+
+```powershell
+cd apps/api
+Copy-Item .env.neon .env        # git-ignored; holds the connection string
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.demo_seed
+uvicorn app.main:app --port 8000
+```
+
+`make seed-demo` runs the same demo loader. It is idempotent — it rebuilds the
+Northstar Projects tenant (team of five, five workflows, historical runs with
+step-level detail, and a hash-chained audit trail) on every run.
+
+Security: `.env.neon` is git-ignored. Rotate any credential that has been shared
+in plaintext before using it beyond local development, and move it into a secret
+store (see [docs/production-readiness.md](docs/production-readiness.md)).
+
+## Path to production on AWS
+
+[docs/production-readiness.md](docs/production-readiness.md) maps WorkPilot onto
+the target AWS platform (Bedrock AgentCore, LangGraph/Strands, MCP/A2A,
+Step Functions, EKS/Fargate, OpenTelemetry → X-Ray/CloudWatch, Terraform, Vault,
+SSO) with a gap analysis, an AWS resource checklist, and a phased roadmap.
+
 ## Run without Docker
 
 Use two terminals.

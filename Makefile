@@ -1,4 +1,4 @@
-.PHONY: setup dev test lint typecheck migrate seed e2e down
+.PHONY: setup dev test lint typecheck migrate seed seed-demo e2e down
 
 setup:
 	npm ci
@@ -24,6 +24,9 @@ migrate:
 
 seed:
 	cd apps/api && python -m app.seed
+
+seed-demo:
+	cd apps/api && python -m app.demo_seed
 
 e2e:
 	npm run test:frontend
