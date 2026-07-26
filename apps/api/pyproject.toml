@@ -8,7 +8,11 @@ dependencies = [
   "aiosqlite>=0.20,<1",
   "asyncpg>=0.30,<1",
   "fastapi>=0.115,<1",
+  "cryptography>=43,<45",
   "httpx>=0.28,<1",
+  "langchain-aws>=0.2,<1",
+  "langchain-core>=0.3,<1",
+  "langgraph>=0.2,<1",
   "pydantic>=2.9,<3",
   "pydantic-settings>=2.6,<3",
   "PyJWT>=2.10,<3",
@@ -16,6 +20,13 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0.36,<2.1",
   "structlog>=24.4,<26",
   "uvicorn[standard]>=0.32,<1",
+  # OpenTelemetry — traces to AWS X-Ray via ADOT collector, metrics to CloudWatch EMF
+  "opentelemetry-sdk>=1.27,<2",
+  "opentelemetry-instrumentation-fastapi>=0.48b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.27,<2",
+  "opentelemetry-sdk-extension-aws>=2.0,<3",
+  "opentelemetry-propagator-aws-xray>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +57,25 @@ ignore = ["B008"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# opentelemetry packages do not ship complete PEP 561 stubs for all sub-packages;
+# suppress missing-import errors so mypy strict mode keeps passing.
+module = [
+  "opentelemetry.*",
+  "grpc.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# langchain-aws and langgraph do not ship complete PEP 561 stubs; langchain-core
+# is well-typed but its public API re-exports occasionally miss annotations.
+module = [
+  "langchain_aws.*",
+  "langgraph.*",
+  "langchain_core.*",
+]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling"]

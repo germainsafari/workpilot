@@ -1,3 +1,8 @@
+// Demo control-plane API served by the Cloudflare Worker itself (D1-backed).
+// This is a lightweight mirror of the Python FastAPI endpoint in
+// apps/api/app/api/workflows.py, used when the app is deployed without the AWS
+// backend. lib/api.ts points at the Python API instead when
+// NEXT_PUBLIC_CONTROL_PLANE_URL is set.
 import { z } from "zod";
 import { audit, DEMO_USER_ID, ensureDatabase, tenantIdFrom } from "../../../db/runtime";
 

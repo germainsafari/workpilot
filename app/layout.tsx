@@ -49,6 +49,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      {/* Prevent flash of wrong theme */}
+      <script dangerouslySetInnerHTML={{ __html: `(function(){var t=localStorage.getItem('wp-theme')||'system';var d=t==='system'?window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light':t;document.documentElement.setAttribute('data-theme',d);})();` }} />
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

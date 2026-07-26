@@ -1,3 +1,9 @@
+// Raw Cloudflare D1 (SQLite) access for the self-contained demo backend that
+// runs entirely inside the Worker (see app/v1/**). This mirrors the Python
+// control plane's schema and seed data so the app works with no AWS backend.
+// `ensureDatabase()` lazily creates the tables and seeds the Northstar demo
+// tenant on first request. The Drizzle ORM version of the same schema lives in
+// db/schema.ts + db/index.ts (used for typed queries / migrations).
 import { env } from "cloudflare:workers";
 
 export const DEMO_TENANT_ID = "tenant-northstar";

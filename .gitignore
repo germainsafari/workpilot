@@ -33,6 +33,13 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Terraform (state contains account IDs, ARNs, resource IDs)
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/tfplan
+infra/*.tfplan
+
 # Python
 **/.venv/
 **/__pycache__/

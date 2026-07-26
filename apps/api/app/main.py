@@ -10,6 +10,11 @@ from app.api.runs import router as runs_router
 from app.api.workflows import router as workflows_router
 from app.config import get_settings
 from app.db import create_schema
+from app.telemetry import configure_telemetry, instrument_fastapi
+
+# Initialise OTel before the FastAPI app is created.  When
+# WORKPILOT_OTEL_ENABLED=false (the default) this is a complete no-op.
+configure_telemetry()
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -17,6 +22,8 @@ logger = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Attach FastAPI instrumentation now that the app object is fully built.
+    instrument_fastapi(app)
     if settings.auto_create_schema:
         await create_schema()
     if settings.seed_demo_data:

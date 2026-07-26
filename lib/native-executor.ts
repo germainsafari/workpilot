@@ -1,3 +1,9 @@
+// TypeScript twin of the Python NativeExecutor (apps/api/app/executor.py).
+// It runs inside the Cloudflare Worker so the D1-backed demo API
+// (app/v1/workflows/[id]/runs) can execute a workflow with zero external
+// dependencies. Like the Python version it is deterministic and never performs
+// live external writes (tool steps default to dry-run).
+
 export type ExecutableStep = {
   id: string;
   name: string;

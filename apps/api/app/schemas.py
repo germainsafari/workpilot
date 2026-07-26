@@ -1,3 +1,21 @@
+"""Pydantic contracts for WorkPilot.
+
+Two responsibilities live here:
+
+1. The ``workpilot.io/v1`` *canonical workflow* schema (``CanonicalWorkflow`` and
+   its discriminated ``WorkflowStep`` union). This is the versioned source of
+   truth for a workflow's shape — it is validated on write, stored as JSON in
+   ``workflow_versions.canonical_definition``, and re-validated before every run.
+   ``validate_graph`` enforces the structural invariants (unique ids, edges
+   reference known steps, an end step exists, no unreachable steps).
+2. The request/response DTOs for the HTTP API (``WorkflowCreate``,
+   ``WorkflowDetail``, ``RunCreate``, ``RunRead``, ``AuditRead`` …).
+
+Note the ``from``/``apiVersion`` aliases: the wire format uses ``from`` and
+``apiVersion`` (JS-friendly), while Python attributes use ``from_step`` and
+``api_version``.
+"""
+
 from datetime import datetime
 from typing import Annotated, Any, Literal
 

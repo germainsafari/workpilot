@@ -1,3 +1,19 @@
+"""SQLAlchemy ORM tables for the control plane.
+
+The data model is deliberately tenant-scoped: ``Tenant`` → ``User`` → ``Workflow``
+→ ``WorkflowVersion`` (immutable, versioned canonical definition) → ``WorkflowRun``
+→ ``StepRun``. ``AuditEvent`` is an append-only, per-tenant hash-chained log.
+
+Key constraints worth noting:
+* ``workflow_versions`` is unique on (workflow_id, version_number).
+* ``workflow_runs`` is unique on (tenant_id, idempotency_key) — this is what makes
+  run creation idempotent and prevents duplicate executions.
+
+This schema is mirrored in three places that must stay in sync: this file (the
+Postgres/SQLite source of truth), the Alembic migration ``0001_phase_one``, and
+the Cloudflare D1 schema in ``db/runtime.ts`` used by the demo deployment.
+"""
+
 from datetime import datetime
 from typing import Any
 

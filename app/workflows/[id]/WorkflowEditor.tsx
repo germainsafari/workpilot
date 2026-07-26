@@ -22,10 +22,12 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  CircleDollarSign,
   CircleStop,
   Clock3,
   CloudUpload,
   CornerDownRight,
+  Gauge,
   GitBranch,
   Hand,
   History,
@@ -48,6 +50,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, formatDuration, formatRelativeTime, type ApiRun } from "../../../lib/api";
 import type { StepType, WorkflowSummary } from "../../../lib/types";
 import { StatusPill } from "../../components/StatusPill";
 
@@ -82,52 +85,59 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
     labelStyle: { fill: "#5f655f", fontSize: 11, fontWeight: 650 },
     labelBgStyle: { fill: "#f6f7f3", fillOpacity: 1 },
   })), [workflow.definition.edges]);
+
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [selected, setSelected] = useState<FlowNode | null>(initialNodes[1] ?? null);
   const [tab, setTab] = useState<"build" | "explain" | "activity">("build");
   const [saved, setSaved] = useState(true);
   const [published, setPublished] = useState(workflow.status === "active");
-  const [testing, setTesting] = useState(false);
-  const [testStep, setTestStep] = useState(-1);
-  const [testComplete, setTestComplete] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const stepSequence = useRef(0);
 
+  // Live run state
+  const [activeRun, setActiveRun] = useState<ApiRun | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [showTestDrawer, setShowTestDrawer] = useState(false);
+
   const onConnect = useCallback((connection: Connection) => {
-    setEdges((current) => addEdge({ ...connection, type: "smoothstep" }, current));
+    setEdges((cur) => addEdge({ ...connection, type: "smoothstep" }, cur));
     setSaved(false);
   }, [setEdges]);
-  const onSelectionChange = useCallback(({ nodes: selectedNodes }: OnSelectionChangeParams) => setSelected((selectedNodes[0] as FlowNode | undefined) ?? null), []);
-
-  useEffect(() => {
-    if (!testing) return;
-    const timer = window.setInterval(() => {
-      setTestStep((current) => {
-        if (current >= 4) {
-          window.clearInterval(timer);
-          setTesting(false);
-          setTestComplete(true);
-          return 5;
-        }
-        return current + 1;
-      });
-    }, 650);
-    return () => window.clearInterval(timer);
-  }, [testing]);
-
-  const startTest = () => {
-    setTestComplete(false);
-    setTestStep(0);
-    setTesting(true);
-  };
+  const onSelectionChange = useCallback(({ nodes: sel }: OnSelectionChangeParams) => setSelected((sel[0] as FlowNode | undefined) ?? null), []);
 
   const addStep = (type: StepType) => {
     stepSequence.current += 1;
     const id = `new-step-${stepSequence.current}`;
-    setNodes((current) => [...current, { id, position: { x: 900, y: 450 }, className: `flow-node flow-${type}`, data: { label: labelForStep(type), summary: "Select this step to describe what it should do.", stepType: type } }]);
+    setNodes((cur) => [...cur, { id, position: { x: 900, y: 450 }, className: `flow-node flow-${type}`, data: { label: labelForStep(type), summary: "Select this step to describe what it should do.", stepType: type } }]);
     setSaved(false);
     setAddOpen(false);
+  };
+
+  const startTest = async () => {
+    setRunError(null);
+    setActiveRun(null);
+    setShowTestDrawer(true);
+    try {
+      const run = await api.runs.trigger(workflow.id, { source: "workpilot_ui_test" });
+      setActiveRun(run);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : "Run failed");
+    }
+  };
+
+  const handlePublish = async () => {
+    setPublishing(true);
+    try {
+      const next = published ? "draft" : "active";
+      await api.workflows.updateStatus(workflow.id, next);
+      setPublished(!published);
+    } catch {
+      // keep UI state unchanged on error
+    } finally {
+      setPublishing(false);
+    }
   };
 
   return (
@@ -135,11 +145,20 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
       <header className="editor-header">
         <div className="editor-title-row">
           <Link href="/workflows" className="icon-button" aria-label="Back to workflows"><ArrowLeft size={18} /></Link>
-          <div className="editor-title"><span className="editor-symbol"><WorkflowIcon size={18} /></span><div><div><h1>{workflow.name}</h1><StatusPill status={published ? "active" : "draft"} /></div><p>{saved ? "All changes saved" : "Unsaved changes"} · Version 3</p></div></div>
+          <div className="editor-title">
+            <span className="editor-symbol"><WorkflowIcon size={18} /></span>
+            <div>
+              <div><h1>{workflow.name}</h1><StatusPill status={published ? "active" : "draft"} /></div>
+              <p>{saved ? "All changes saved" : "Unsaved changes"} · {workflow.department}</p>
+            </div>
+          </div>
           <div className="editor-actions">
             <button className="icon-button" aria-label="More workflow options"><MoreHorizontal size={19} /></button>
-            <button className="secondary-button" onClick={startTest} disabled={testing}><Play size={16} />{testing ? "Testing…" : "Test safely"}</button>
-            <button className={published ? "secondary-button publish-button published" : "primary-button publish-button"} onClick={() => setPublished((value) => !value)}>{published ? <Check size={16} /> : <CloudUpload size={16} />}{published ? "Published" : "Publish"}</button>
+            <button className="secondary-button" onClick={startTest}><Play size={16} />Test safely</button>
+            <button className={published ? "secondary-button publish-button published" : "primary-button publish-button"} onClick={handlePublish} disabled={publishing}>
+              {publishing ? <LoaderCircle size={16} className="spin" /> : published ? <Check size={16} /> : <CloudUpload size={16} />}
+              {published ? "Published" : "Publish"}
+            </button>
           </div>
         </div>
         <div className="editor-tabs" role="tablist">
@@ -170,7 +189,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
             <MiniMap position="bottom-right" pannable zoomable nodeColor={(node) => node.data?.stepType === "approval" ? "#f3a955" : node.data?.stepType === "ai_task" ? "#a687f5" : "#9ed6b4"} />
             <Panel position="top-left" className="canvas-toolbar">
               <div className="add-step-wrap">
-                <button className="primary-button small-button" onClick={() => setAddOpen((value) => !value)}><Plus size={16} />Add step <ChevronDown size={14} /></button>
+                <button className="primary-button small-button" onClick={() => setAddOpen((v) => !v)}><Plus size={16} />Add step <ChevronDown size={14} /></button>
                 {addOpen && <div className="add-step-menu">{(["ai_task", "tool", "condition", "approval", "wait", "end"] as StepType[]).map((type) => <button key={type} onClick={() => addStep(type)}>{stepIcon(type)}<span><strong>{labelForStep(type)}</strong><small>{type === "ai_task" ? "Summarize, classify, or prepare" : type === "tool" ? "Prepare a task or message" : type === "approval" ? "Pause for a person" : "Control the flow"}</small></span></button>)}</div>}
               </div>
               <span className="toolbar-separator" />
@@ -182,13 +201,22 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
           <div className="canvas-legend"><span><b className="legend-dot reasoning" />AI-assisted</span><span><b className="legend-dot deterministic" />Fixed rule</span><span><b className="legend-dot approval" />Human approval</span></div>
         </div>
         <aside className="configuration-panel">
-          {selected ? <StepConfiguration node={selected} onClose={() => setSelected(null)} onChange={(label) => { setNodes((current) => current.map((node) => node.id === selected.id ? { ...node, data: { ...node.data, label } } : node)); setSelected((current) => current ? { ...current, data: { ...current.data, label } } : null); setSaved(false); }} /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and safeguards.</p></div>}
+          {selected ? <StepConfiguration node={selected} onClose={() => setSelected(null)} onChange={(label) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, label } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, label } } : null); setSaved(false); }} /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and safeguards.</p></div>}
         </aside>
       </div>}
 
       {tab === "explain" && <Explanation workflow={workflow} />}
-      {tab === "activity" && <Activity />}
-      {(testing || testComplete) && <TestDrawer workflow={workflow} activeStep={testStep} complete={testComplete} onClose={() => { setTesting(false); setTestComplete(false); }} />}
+      {tab === "activity" && <Activity workflowId={workflow.id} />}
+
+      {showTestDrawer && (
+        <LiveTestDrawer
+          workflowId={workflow.id}
+          run={activeRun}
+          error={runError}
+          onClose={() => { setShowTestDrawer(false); setActiveRun(null); setRunError(null); }}
+          onRerun={startTest}
+        />
+      )}
     </div>
   );
 }
@@ -197,7 +225,7 @@ function StepConfiguration({ node, onClose, onChange }: { node: FlowNode; onClos
   return <>
     <div className="config-head"><div className={`config-icon config-${node.data.stepType}`}>{stepIcon(node.data.stepType, 18)}</div><div><small>{labelForStep(node.data.stepType)}</small><h2>{node.data.label}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close step settings"><X size={17} /></button></div>
     <div className="config-body">
-      <label className="form-field"><span>Step name</span><input value={node.data.label} onChange={(event) => onChange(event.target.value)} /></label>
+      <label className="form-field"><span>Step name</span><input value={node.data.label} onChange={(e) => onChange(e.target.value)} /></label>
       <div className="form-field"><span>What happens here</span><p className="read-only-field">{node.data.summary}</p></div>
       {node.data.stepType === "ai_task" && <div className="config-section"><h3><Bot size={16} />How WorkPilot helps</h3><p>It organizes the brief into a fixed structure and returns a concise summary. It cannot send messages or change external records.</p><span className="safety-chip"><ShieldCheck size={14} />Structured result required</span></div>}
       {node.data.stepType === "approval" && <><label className="form-field"><span>Who reviews it?</span><button className="select-field">Account manager <ChevronDown size={15} /></button></label><div className="config-section approval-rule"><h3><LockKeyhole size={16} />Approval rule</h3><p>The workflow pauses here. Later actions cannot run until the assigned reviewer approves.</p></div></>}
@@ -211,13 +239,153 @@ function Explanation({ workflow }: { workflow: WorkflowSummary }) {
   return <div className="explanation-page"><div className="explanation-main"><div className="explanation-hero"><span><MessageSquareText size={22} /></span><div><p className="eyebrow">In plain language</p><h2>What this workflow does</h2><p>{workflow.description} Every action stays in safe test mode until a person approves publication.</p></div></div><div className="explanation-sections"><section><span>1</span><div><h3>What starts it</h3><p>A new client brief arrives through the connected form. WorkPilot records who submitted it and when.</p></div></section><section><span>2</span><div><h3>What it reads and prepares</h3><p>It reads only the submitted brief, then organizes deliverables, markets, dates, languages, and constraints.</p></div></section><section><span>3</span><div><h3>Where a person stays in control</h3><p>The account manager must review the standardized brief before any project tasks can be prepared.</p></div></section><section><span>4</span><div><h3>When something goes wrong</h3><p>The run retries once. If the issue remains, it pauses and tells the workflow owner without repeating completed actions.</p></div></section></div></div><aside className="explanation-aside"><h3>Safeguards</h3><div><ShieldCheck size={17} /><span><strong>No live writes in tests</strong><small>Connected tools are never changed during a safe test.</small></span></div><div><Hand size={17} /><span><strong>Human approval required</strong><small>Project tasks wait for an account manager.</small></span></div><div><LockKeyhole size={17} /><span><strong>Limited data access</strong><small>Only client brief fields are available to this workflow.</small></span></div><hr /><h3>Estimated usage</h3><p className="estimate"><strong>$1.60–$2.10</strong><small>per 100 completed briefs</small></p><p className="estimate"><strong>24 minutes</strong><small>estimated manual time saved per brief</small></p></aside></div>;
 }
 
-function Activity() {
-  return <div className="activity-page"><div className="activity-summary"><div><CheckCircle2 size={19} /><span><strong>97.6%</strong><small>completion</small></span></div><div><Clock3 size={19} /><span><strong>1m 42s</strong><small>average duration</small></span></div><div><Sparkles size={19} /><span><strong>$1.62</strong><small>cost this month</small></span></div></div><section className="panel"><div className="panel-heading"><div><p className="section-kicker">Execution history</p><h2>Recent runs</h2></div><button className="secondary-button"><History size={16} />Download audit record</button></div><div className="table-wrap"><table className="data-table"><thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Trigger</th><th>Duration</th><th>Cost</th></tr></thead><tbody>{[["#1048", "completed", "Today, 10:24", "Form submission", "1m 48s", "$0.038"], ["#1046", "waiting", "Today, 09:51", "Email received", "32m", "$0.014"], ["#1039", "completed", "Yesterday, 16:18", "Form submission", "1m 31s", "$0.034"]].map((row) => <tr key={row[0]}><td><strong>{row[0]}</strong></td><td><StatusPill status={row[1]} /></td><td>{row[2]}</td><td>{row[3]}</td><td>{row[4]}</td><td>{row[5]}</td></tr>)}</tbody></table></div></section></div>;
+function Activity({ workflowId }: { workflowId: string }) {
+  const [runs, setRuns] = useState<ApiRun[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.runs.list().then((all) => {
+      setRuns(all.filter((r) => r.workflow_id === workflowId));
+    }).catch(() => setRuns([])).finally(() => setLoading(false));
+  }, [workflowId]);
+
+  const completed = runs.filter((r) => r.status === "completed").length;
+  const totalCost = runs.reduce((sum, r) => sum + r.total_cost, 0);
+  const durations = runs.filter((r) => r.finished_at).map((r) => new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime());
+  const avgMs = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
+
+  return <div className="activity-page">
+    <div className="activity-summary">
+      <div><CheckCircle2 size={19} /><span><strong>{completed}/{runs.length}</strong><small>completed</small></span></div>
+      <div><Clock3 size={19} /><span><strong>{avgMs > 0 ? formatDuration(new Date(Date.now() - avgMs).toISOString(), new Date().toISOString()) : "—"}</strong><small>avg duration</small></span></div>
+      <div><Gauge size={19} /><span><strong>${totalCost.toFixed(4)}</strong><small>total AI cost</small></span></div>
+    </div>
+    <section className="panel">
+      <div className="panel-heading"><div><p className="section-kicker">Execution history</p><h2>Recent runs</h2></div></div>
+      {loading ? (
+        <div className="empty-state"><LoaderCircle size={24} className="spin" /><p>Loading runs…</p></div>
+      ) : runs.length === 0 ? (
+        <div className="empty-state"><History size={24} /><h3>No runs yet</h3><p>Click "Test safely" to trigger your first run.</p></div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Trigger</th><th>Steps</th><th>Duration</th><th>AI cost</th></tr></thead>
+            <tbody>{runs.map((run) => (
+              <tr key={run.id}>
+                <td><strong>#{run.id.slice(-8)}</strong></td>
+                <td><StatusPill status={run.status} /></td>
+                <td>{formatRelativeTime(run.started_at)}</td>
+                <td>{run.trigger_type}</td>
+                <td>{run.steps.length} steps</td>
+                <td>{formatDuration(run.started_at, run.finished_at)}</td>
+                <td>${run.total_cost.toFixed(4)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  </div>;
 }
 
-function TestDrawer({ workflow, activeStep, complete, onClose }: { workflow: WorkflowSummary; activeStep: number; complete: boolean; onClose: () => void }) {
-  const steps = workflow.definition.steps.filter((step) => step.id !== "wait").slice(0, 6);
-  return <div className="test-drawer" role="dialog" aria-modal="true" aria-label="Safe test run"><div className="test-head"><div><span className="safe-test-icon"><Play size={17} /></span><div><p>Safe test</p><h2>{complete ? "Test completed" : "Running sample brief"}</h2></div></div><button className="icon-button" onClick={onClose} aria-label="Close test"><X size={18} /></button></div><div className="test-banner"><ShieldCheck size={17} /><p><strong>No live tools are changed.</strong> This run uses sample data and records what would happen.</p></div><div className="test-steps">{steps.map((step, index) => { const running = index === activeStep && !complete; const done = complete || index < activeStep; return <div className={running ? "test-step running" : done ? "test-step done" : "test-step"} key={step.id}><span>{running ? <LoaderCircle className="spin" size={16} /> : done ? <Check size={15} /> : index + 1}</span><div><strong>{step.name}</strong><small>{done ? (step.type === "approval" ? "Approval simulated for demo" : "Completed with sample output") : running ? "Checking sample data…" : "Waiting"}</small></div>{done && <b>{index === 1 ? "$0.008" : "0.1s"}</b>}</div>; })}</div><div className="test-footer">{complete ? <><div className="test-result"><CheckCircle2 size={20} /><span><strong>Ready to publish</strong><small>6 steps passed · Estimated production cost $0.038</small></span></div><button className="primary-button" onClick={onClose}>Review result</button></> : <><p><strong>Step {Math.min(activeStep + 1, 6)} of 6</strong><span>Estimated test cost: $0.00</span></p><button className="secondary-button" onClick={onClose}>Stop test</button></>}</div></div>;
+function LiveTestDrawer({
+  workflowId, run, error, onClose, onRerun,
+}: {
+  workflowId: string;
+  run: ApiRun | null;
+  error: string | null;
+  onClose: () => void;
+  onRerun: () => void;
+}) {
+  const waiting = !run && !error;
+  const steps = run?.steps ?? [];
+  const aiStep = steps.find((s) => s.model_usage && Object.keys(s.model_usage).length > 0);
+  const aiProvider = aiStep ? String(aiStep.model_usage.provider ?? "—") : "—";
+  const aiCost = aiStep ? Number(aiStep.model_usage.cost_usd ?? 0) : 0;
+
+  return (
+    <div className="test-drawer" role="dialog" aria-modal="true" aria-label="Live test run">
+      <div className="test-head">
+        <div>
+          <span className="safe-test-icon"><Play size={17} /></span>
+          <div>
+            <p>Live test · {workflowId}</p>
+            <h2>{waiting ? "Running…" : error ? "Run failed" : run?.status === "completed" ? "Test completed" : `Status: ${run?.status}`}</h2>
+          </div>
+        </div>
+        <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+
+      <div className="test-banner">
+        <ShieldCheck size={17} />
+        <p><strong>Real execution on Bedrock.</strong> This calls the live API and runs your workflow steps with AI.</p>
+      </div>
+
+      {waiting && (
+        <div className="empty-state" style={{ padding: "2rem" }}>
+          <LoaderCircle size={28} className="spin" />
+          <p>Waiting for run to complete…</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="empty-state" style={{ padding: "2rem" }}>
+          <AlertTriangle size={28} />
+          <h3>Error</h3>
+          <p>{error}</p>
+          <button className="secondary-button" onClick={onRerun}>Try again</button>
+        </div>
+      )}
+
+      {run && !error && (
+        <>
+          <div className="test-steps">
+            {steps.map((step, index) => {
+              const done = step.status === "completed";
+              const usage = step.model_usage ?? {};
+              const provider = usage.provider ? String(usage.provider) : null;
+              return (
+                <div className={done ? "test-step done" : "test-step"} key={step.id}>
+                  <span>{done ? <Check size={15} /> : index + 1}</span>
+                  <div>
+                    <strong>{step.step_id}</strong>
+                    <small>
+                      {provider ? `${provider} · ` : ""}{formatDuration(step.started_at, step.finished_at)}
+                    </small>
+                  </div>
+                  {provider && <b>${Number(usage.cost_usd ?? 0).toFixed(5)}</b>}
+                </div>
+              );
+            })}
+          </div>
+          <div className="test-footer">
+            {run.status === "completed" ? (
+              <>
+                <div className="test-result">
+                  <CheckCircle2 size={20} />
+                  <span>
+                    <strong>Completed · {steps.length} steps</strong>
+                    <small>
+                      AI: {aiProvider} · cost ${aiCost.toFixed(5)} · {formatDuration(run.started_at, run.finished_at)}
+                    </small>
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button className="secondary-button" onClick={onRerun}><Play size={15} />Run again</button>
+                  <button className="primary-button" onClick={onClose}>Done</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p><strong>Status: {run.status}</strong></p>
+                <button className="secondary-button" onClick={onClose}>Close</button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 export function WorkflowEditor({ workflow }: { workflow: WorkflowSummary }) {

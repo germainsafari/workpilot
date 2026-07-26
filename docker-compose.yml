@@ -2,11 +2,11 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: workpilot
-      POSTGRES_USER: workpilot
-      POSTGRES_PASSWORD: workpilot-local
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U workpilot -d workpilot"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -32,15 +32,13 @@ services:
     build:
       context: ./apps/api
     entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]
+    env_file: .env
     environment:
-      WORKPILOT_ENVIRONMENT: local
-      WORKPILOT_DATABASE_URL: postgresql+asyncpg://workpilot:workpilot-local@postgres:5432/workpilot
+      WORKPILOT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       WORKPILOT_REDIS_URL: redis://redis:6379/0
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
       WORKPILOT_EXECUTE_RUNS_INLINE: "false"
-      WORKPILOT_LOCAL_AUTH_ENABLED: "true"
-      WORKPILOT_CORS_ORIGINS: http://localhost:3000
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,9 +56,9 @@ services:
     build:
       context: ./apps/api
     command: ["python", "-m", "app.worker"]
+    env_file: .env
     environment:
-      WORKPILOT_ENVIRONMENT: local
-      WORKPILOT_DATABASE_URL: postgresql+asyncpg://workpilot:workpilot-local@postgres:5432/workpilot
+      WORKPILOT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       WORKPILOT_REDIS_URL: redis://redis:6379/0
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
@@ -72,8 +70,7 @@ services:
   web:
     build:
       context: .
-    environment:
-      NEXT_PUBLIC_CONTROL_PLANE_URL: http://localhost:8000
+    env_file: .env
     depends_on:
       api:
         condition: service_healthy

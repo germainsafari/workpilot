@@ -1,3 +1,8 @@
+// Presentation-layer types for the UI. These describe the richer shape the
+// React components render (including canvas x/y positions and marketing-style
+// metrics), which is a superset of what the backend API returns. The mapping
+// from the API's canonical shape to these types lives in WorkflowList.tsx.
+
 export type WorkflowStatus = "active" | "draft" | "paused";
 export type RiskLevel = "low" | "medium" | "high";
 export type StepType = "trigger" | "tool" | "ai_task" | "condition" | "wait" | "approval" | "end";

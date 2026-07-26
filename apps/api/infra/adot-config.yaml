@@ -1,0 +1,47 @@
+# AWS Distro for OpenTelemetry (ADOT) collector configuration
+# Deploy this as an ECS sidecar container alongside the WorkPilot API task.
+#
+# The WorkPilot API sends spans via OTLP gRPC to localhost:4317.
+# The collector fans those out to:
+#   - AWS X-Ray (traces)
+#   - CloudWatch via the Embedded Metrics Format exporter (metrics)
+#
+# Required IAM permissions for the ECS task role:
+#   xray:PutTraceSegments, xray:PutTelemetryRecords
+#   logs:CreateLogGroup, logs:CreateLogDelivery, logs:PutLogEvents
+#   cloudwatch:PutMetricData (for EMF fallback)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 50
+
+exporters:
+  awsxray:
+    region: eu-central-1
+  awsemf:
+    region: eu-central-1
+    namespace: WorkPilot
+    dimension_rollup_option: NoDimensionRollup
+    metric_declarations:
+      - dimensions: [[service.name, deployment.environment]]
+        metric_name_selectors: [".*"]
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [awsemf]

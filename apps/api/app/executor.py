@@ -1,8 +1,30 @@
+"""The Phase-1 native workflow executor.
+
+``NativeExecutor`` walks a validated ``CanonicalWorkflow`` graph one step at a
+time, deterministically, and returns a ``StepResult`` per executed step. It is
+the safety boundary of the product:
+
+* ``ai_task`` steps are delegated to an :class:`AgentRuntime` (deterministic mock
+  by default, Bedrock/LangGraph when configured) — never to free-form code.
+* ``tool`` steps are allowlisted and **dry-run only**; a live write
+  (``dry_run=False``) raises :class:`ExecutionPolicyError`.
+* ``condition``/``wait``/``end`` steps run as ordinary, repeatable code.
+* Cycles are detected and rejected so a run can never loop forever.
+
+Branching after a condition picks the outgoing edge whose label matches the
+truthiness of the condition result (``ready``/``yes`` vs ``missing``/``no`` …).
+"""
+
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.schemas import AITaskStep, CanonicalWorkflow, ConditionStep, EndStep, ToolStep, WaitStep
+
+if TYPE_CHECKING:
+    from app.runtimes.base import AgentRuntime
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -51,7 +73,15 @@ class DeterministicMockModel:
 
 
 class NativeExecutor:
-    def __init__(self, model: DeterministicMockModel | None = None) -> None:
+    def __init__(
+        self,
+        model: DeterministicMockModel | None = None,
+        runtime: AgentRuntime | None = None,
+    ) -> None:
+        self._runtime = runtime
+        # Keep self.model as a public attribute for backwards compatibility.
+        # When a runtime is provided it takes precedence; self.model is still
+        # available as a fallback / direct-use path.
         self.model = model or DeterministicMockModel()
 
     async def execute(self, workflow: CanonicalWorkflow, initial_input: dict[str, Any]) -> list[StepResult]:
@@ -76,7 +106,10 @@ class NativeExecutor:
             tool_usage: dict[str, Any] = {}
 
             if isinstance(step, AITaskStep):
-                output, model_usage = await self.model.execute(step, step_input)
+                if self._runtime is not None:
+                    output, model_usage = await self._runtime.execute(step, step_input)
+                else:
+                    output, model_usage = await self.model.execute(step, step_input)
             elif isinstance(step, ToolStep):
                 if not step.dry_run:
                     raise ExecutionPolicyError(
