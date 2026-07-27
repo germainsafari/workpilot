@@ -64,11 +64,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  if (pathname === "/login") {
-    return <>{children}</>;
-  }
-
   useEffect(() => {
+    if (pathname === "/login") return;
     refreshShellData();
     const onFocus = () => refreshShellData();
     window.addEventListener("focus", onFocus);
@@ -81,6 +78,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [refreshShellData, pathname]);
 
   useEffect(() => {
+    if (pathname === "/login") return;
     const onClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setNotifOpen(false);
@@ -89,7 +87,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
-  }, []);
+  }, [pathname]);
+
+  if (pathname === "/login") {
+    return <>{children}</>;
+  }
 
   const runSearch = (e: React.FormEvent) => {
     e.preventDefault();
