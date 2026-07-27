@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
 import { workflows } from "../../../lib/demo-data";
-import { WorkflowEditor } from "./WorkflowEditor";
+import { configuredControlPlaneUrl } from "../../../lib/api-base";
+import { WorkflowDetailLoader } from "./WorkflowDetailLoader";
 
 type PageProps = { params: Promise<{ id: string }> };
 
@@ -13,7 +13,12 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
 export default async function WorkflowDetailPage({ params }: PageProps) {
   const { id } = await params;
-  const workflow = workflows.find((item) => item.id === id);
-  if (!workflow) notFound();
-  return <WorkflowEditor workflow={workflow} />;
+  const fallback = configuredControlPlaneUrl()
+    ? undefined
+    : workflows.find((item) => item.id === id);
+  return (
+    <div className="page">
+      <WorkflowDetailLoader id={id} fallback={fallback} />
+    </div>
+  );
 }

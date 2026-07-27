@@ -11,6 +11,7 @@ from app.auth import Principal, current_principal
 from app.db import get_session
 from app.models import Workflow, WorkflowVersion
 from app.schemas import CanonicalWorkflow, WorkflowCreate, WorkflowDetail, WorkflowRead, WorkflowUpdate
+from app.users import ensure_principal_user
 
 router = APIRouter(prefix="/workflows", tags=["Workflows"])
 
@@ -39,6 +40,11 @@ async def create_workflow(
     principal: Principal = Depends(current_principal),
     session: AsyncSession = Depends(get_session),
 ) -> Workflow:
+    try:
+        await ensure_principal_user(session, principal)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+
     workflow_id = f"wf-{uuid4()}"
     version_id = f"version-{uuid4()}"
     workflow = Workflow(

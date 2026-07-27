@@ -9,13 +9,10 @@ import {
   CircleDollarSign,
   Clock3,
   Cloud,
-  FileText,
   Filter,
-  FolderOpen,
   Gauge,
   LayoutTemplate,
   LoaderCircle,
-  Mail,
   MessageSquare,
   MoreHorizontal,
   Plus,
@@ -28,9 +25,20 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, formatDuration, formatRelativeTime, type ApiRun, type ApiWorkflow } from "../../lib/api";
-import { templateCards, workflows } from "../../lib/demo-data";
+import { api, formatDuration, formatRelativeTime, parseApiDate, runWorkflowLabel, type ApiRun, type ApiWorkflow } from "../../lib/api";
+import { usesLiveControlPlane } from "../../lib/api-base";
+import { templateCards } from "../../lib/demo-data";
+import { dailyRunCounts, totalAutomationHours, workflowTimeSavedRanking } from "../../lib/workflow-stats";
 import { ConnectModal, type SavedConnection } from "../components/ConnectModal";
+import { loadConnections, removeConnection as removeStoredConnection } from "../../lib/connections";
+import {
+  BUSINESS_CONNECTORS,
+  CONNECTOR_CATEGORIES,
+  connectorModalDefaults,
+  isConnectorConnected,
+  type BusinessConnector,
+  type ConnectorCategory,
+} from "../../lib/connectors";
 import { RunDetailsDrawer } from "../components/RunDetailsDrawer";
 import { StatusPill } from "../components/StatusPill";
 
@@ -173,8 +181,8 @@ function Templates() {
                 <li><Check size={14} />Includes human review</li>
                 <li><ShieldCheck size={14} />Safe test data included</li>
               </ul>
-              <Link href={`/workflows/${workflows[index]?.id ?? "wf-client-brief"}`} className="secondary-button">
-                Preview template <ArrowRight size={16} />
+              <Link href="/workflows/new" className="secondary-button">
+                Use template <ArrowRight size={16} />
               </Link>
             </div>
           </article>
@@ -186,18 +194,28 @@ function Templates() {
 
 function Runs() {
   const [runs, setRuns] = useState<ApiRun[]>([]);
+  const [workflows, setWorkflows] = useState<ApiWorkflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [openRun, setOpenRun] = useState<ApiRun | null>(null);
 
   useEffect(() => {
-    api.runs.list().then(setRuns).catch(() => setRuns([])).finally(() => setLoading(false));
+    Promise.all([
+      api.runs.list().catch(() => [] as ApiRun[]),
+      api.workflows.list().catch(() => [] as ApiWorkflow[]),
+    ])
+      .then(([r, w]) => {
+        setRuns(r);
+        setWorkflows(w);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const filtered = runs.filter((r) =>
     (statusFilter === "all" || r.status === statusFilter) &&
-    (r.workflow_id.toLowerCase().includes(query.toLowerCase()) ||
+    (runWorkflowLabel(r, workflows).toLowerCase().includes(query.toLowerCase()) ||
+    r.workflow_id.toLowerCase().includes(query.toLowerCase()) ||
     r.id.toLowerCase().includes(query.toLowerCase()) ||
     r.trigger_type.toLowerCase().includes(query.toLowerCase()))
   );
@@ -205,7 +223,7 @@ function Runs() {
   const completed = runs.filter((r) => r.status === "completed").length;
   const waiting = runs.filter((r) => r.status === "running" || r.status === "queued").length;
   const totalCost = runs.reduce((sum, r) => sum + r.total_cost, 0);
-  const durations = runs.filter((r) => r.finished_at).map((r) => new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime());
+  const durations = runs.filter((r) => r.finished_at).map((r) => parseApiDate(r.finished_at!).getTime() - parseApiDate(r.started_at).getTime());
   const avgMs = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
 
   return (
@@ -247,7 +265,7 @@ function Runs() {
                 {filtered.map((run) => (
                   <tr key={run.id} className="clickable-row" onClick={() => setOpenRun(run)}>
                     <td><strong>#{run.id.slice(-8)}</strong></td>
-                    <td><Link href={`/workflows/${run.workflow_id}`} onClick={(e) => e.stopPropagation()}>{run.workflow_id}</Link><small>{run.trigger_type}</small></td>
+                    <td><Link href={`/workflows/${run.workflow_id}`} onClick={(e) => e.stopPropagation()}>{runWorkflowLabel(run, workflows)}</Link><small>{run.trigger_type}</small></td>
                     <td><StatusPill status={run.status} /></td>
                     <td>{formatRelativeTime(run.started_at)}</td>
                     <td>
@@ -283,23 +301,29 @@ function Runs() {
 function Approvals() {
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [waitingRuns, setWaitingRuns] = useState<ApiRun[]>([]);
+  const [workflows, setWorkflows] = useState<ApiWorkflow[]>([]);
+  const liveMode = usesLiveControlPlane();
 
   useEffect(() => {
-    api.runs.list()
-      .then((runs) => setWaitingRuns(runs.filter((r) => r.status === "queued" || r.status === "running")))
-      .catch(() => {});
+    Promise.all([
+      api.runs.list().catch(() => [] as ApiRun[]),
+      api.workflows.list().catch(() => [] as ApiWorkflow[]),
+    ]).then(([runs, wfs]) => {
+      setWaitingRuns(runs.filter((r) => r.status === "queued" || r.status === "running"));
+      setWorkflows(wfs);
+    });
   }, []);
 
-  const staticApprovals = [
-    { id: "ap-1", workflow: "Client brief processor", title: "Approve the standardized brief", subject: "Northstar Foods · Spring launch", risk: "medium", due: "Due in 3h", owner: "Maya Chen", summary: "WorkPilot found all required fields and prepared 12 delivery tasks. Review the dates and markets before tasks are created." },
-    { id: "ap-2", workflow: "Invoice preparation", title: "Review invoice draft", subject: "Cascade Labs · INV-2026-071", risk: "high", due: "Due today at 16:00", owner: "Noah Williams", summary: "The draft includes 164 approved hours and €820 in expenses. Two weekend entries are above the standard rate." },
-    { id: "ap-3", workflow: "Meeting to action", title: "Confirm meeting actions", subject: "Quarterly account review", risk: "low", due: "Due tomorrow", owner: "Alex Morgan", summary: "Seven actions were identified. Two have dates but no owner, so WorkPilot will not create them yet." },
+  const staticApprovals = liveMode ? [] : [
+    { id: "ap-1", workflow: "Client brief processor", title: "Approve the standardized brief", subject: "Northstar Foods · Spring launch", risk: "medium" as const, due: "Due in 3h", owner: "Maya Chen", summary: "WorkPilot found all required fields and prepared 12 delivery tasks. Review the dates and markets before tasks are created." },
+    { id: "ap-2", workflow: "Invoice preparation", title: "Review invoice draft", subject: "Cascade Labs · INV-2026-071", risk: "high" as const, due: "Due today at 16:00", owner: "Noah Williams", summary: "The draft includes 164 approved hours and €820 in expenses. Two weekend entries are above the standard rate." },
+    { id: "ap-3", workflow: "Meeting to action", title: "Confirm meeting actions", subject: "Quarterly account review", risk: "low" as const, due: "Due tomorrow", owner: "Alex Morgan", summary: "Seven actions were identified. Two have dates but no owner, so WorkPilot will not create them yet." },
   ];
 
   const liveApprovals = waitingRuns.map((run) => ({
     id: run.id,
-    workflow: run.workflow_id,
-    title: `Review run output`,
+    workflow: runWorkflowLabel(run, workflows),
+    title: "Review run output",
     subject: `Run #${run.id.slice(-8)} · ${run.trigger_type}`,
     risk: "medium" as const,
     due: "Awaiting decision",
@@ -315,10 +339,16 @@ function Approvals() {
       <div className="approval-list">
         <div className="approval-filter">
           <button className="active">Assigned to me <span>{allApprovals.length}</span></button>
-          <button>Team queue <span>5</span></button>
+          {liveMode ? (
+            <button disabled>Team queue <span>0</span></button>
+          ) : (
+            <button>Team queue <span>5</span></button>
+          )}
           <button>Decided</button>
         </div>
-        {allApprovals.map((approval) => (
+        {allApprovals.length === 0 ? (
+          <div className="empty-state"><CheckCircle2 size={24} /><h3>No approvals waiting</h3><p>When a workflow pauses for review, it will appear here.</p></div>
+        ) : allApprovals.map((approval) => (
           <article key={approval.id} className="approval-card">
             {decisions[approval.id] ? (
               <div className="decision-state">
@@ -367,30 +397,24 @@ function Approvals() {
 function Connections() {
   const [modal, setModal] = useState<{ type: "app" | "mcp"; name?: string; url?: string } | null>(null);
   const [saved, setSaved] = useState<SavedConnection[]>([]);
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<ConnectorCategory | "all">("all");
 
   useEffect(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("wp-connections") ?? "[]") as SavedConnection[];
-      setSaved(stored);
-    } catch { /* ignore */ }
+    setSaved(loadConnections());
   }, []);
 
-  const handleSave = (conn: SavedConnection) => setSaved((cur) => [...cur, conn]);
-
-  const removeConnection = (id: string) => {
-    const updated = saved.filter((c) => c.id !== id);
-    setSaved(updated);
-    localStorage.setItem("wp-connections", JSON.stringify(updated));
+  const handleSave = (conn: SavedConnection) => {
+    setSaved((cur) => {
+      const key = conn.url.trim().replace(/\/$/, "");
+      const filtered = cur.filter((c) => c.url.trim().replace(/\/$/, "") !== key);
+      return [...filtered, conn];
+    });
   };
 
-  const staticApps = [
-    { name: "Google Drive", status: "Connected", Icon: FolderOpen, scope: "Read approved brief folders" },
-    { name: "Gmail", status: "Connected", Icon: Mail, scope: "Read incoming briefs; sending disabled" },
-    { name: "Slack", status: "Needs attention", Icon: MessageSquare, scope: "Re-authorize by 30 July" },
-    { name: "Microsoft Teams", status: "Available", Icon: MessageSquare, scope: "Not connected" },
-    { name: "Notion", status: "Available", Icon: FileText, scope: "Not connected" },
-    { name: "Scoro", status: "Available", Icon: Cloud, scope: "Not connected" },
-  ];
+  const removeConnection = (id: string) => {
+    setSaved(removeStoredConnection(id));
+  };
 
   const builtInMcp = [
     { name: "WorkPilot Demo MCP", url: "http://localhost:9000/mcp", description: "Local demo server — run apps/mcp-server/server.py to start", tools: ["get_weather", "summarise_text", "list_tasks"] },
@@ -399,6 +423,26 @@ function Connections() {
   ];
 
   const savedMcp = saved.filter((c) => c.type === "mcp");
+  const savedApps = saved.filter((c) => c.type === "app");
+
+  const filteredConnectors = BUSINESS_CONNECTORS.filter((connector) => {
+    const matchesCategory = categoryFilter === "all" || connector.category === categoryFilter;
+    const haystack = [
+      connector.name,
+      connector.category,
+      connector.tagline,
+      ...connector.capabilities,
+    ].join(" ").toLowerCase();
+    const matchesQuery = !query.trim() || haystack.includes(query.trim().toLowerCase());
+    return matchesCategory && matchesQuery;
+  });
+
+  const openConnector = (connector: BusinessConnector) => {
+    const defaults = connectorModalDefaults(connector);
+    setModal(defaults);
+  };
+
+  const connectedCount = BUSINESS_CONNECTORS.filter((c) => isConnectorConnected(c.name, saved)).length;
 
   return (
     <>
@@ -414,28 +458,108 @@ function Connections() {
 
       <div className="connection-note">
         <ShieldCheck size={18} />
-        <p><strong>Connections are permission-scoped.</strong> Each workflow receives only the operations it needs. Credentials are never shown to workflow steps.</p>
+        <p><strong>{BUSINESS_CONNECTORS.length} connectors ready.</strong> Everything below is pre-configured — click Connect, add your credentials, and assign scopes per workflow. Nothing runs until you connect it.</p>
       </div>
 
-      <h2 style={{ margin: "1.5rem 0 0.75rem", fontSize: "1rem", fontWeight: 650 }}>Business apps</h2>
-      <div className="connection-grid">
-        {staticApps.map(({ name, status, Icon, scope }) => (
-          <article key={name}>
-            <span className="connection-icon"><Icon size={23} /></span>
-            <div>
-              <h2>{name}</h2>
-              <StatusPill status={status} />
-              <p>{scope}</p>
-            </div>
-            <button
-              className={status === "Connected" ? "secondary-button" : "primary-button"}
-              onClick={() => setModal({ type: "app", name, url: "" })}
-            >
-              {status === "Connected" ? "Manage" : status === "Needs attention" ? "Fix connection" : "Connect"}
-            </button>
-          </article>
-        ))}
+      <div className="list-toolbar embedded" style={{ marginBottom: "1rem" }}>
+        <label className="table-search">
+          <Search size={16} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search connectors (Telegram, Outlook, Drive…)"
+          />
+        </label>
+        <div className="filter-chips">
+          <Filter size={16} />
+          <button
+            className={categoryFilter === "all" ? "filter-chip active" : "filter-chip"}
+            onClick={() => setCategoryFilter("all")}
+          >
+            All ({BUSINESS_CONNECTORS.length})
+          </button>
+          {CONNECTOR_CATEGORIES.map((category) => {
+            const count = BUSINESS_CONNECTORS.filter((c) => c.category === category).length;
+            return (
+              <button
+                key={category}
+                className={categoryFilter === category ? "filter-chip active" : "filter-chip"}
+                onClick={() => setCategoryFilter(category)}
+              >
+                {category} ({count})
+              </button>
+            );
+          })}
+        </div>
       </div>
+
+      <div className="connection-summary">
+        <span><strong>{connectedCount}</strong> connected</span>
+        <span><strong>{BUSINESS_CONNECTORS.length - connectedCount}</strong> ready to connect</span>
+      </div>
+
+      <h2 style={{ margin: "1.25rem 0 0.75rem", fontSize: "1rem", fontWeight: 650 }}>Business apps</h2>
+      {savedApps.length > 0 && (
+        <div className="connection-grid" style={{ marginBottom: "1rem" }}>
+          {savedApps.map((conn) => (
+            <article key={conn.id} className="connection-card-connected">
+              <span className="connection-icon connection-icon-brand"><Cloud size={23} /></span>
+              <div>
+                <h2>{conn.name}</h2>
+                <StatusPill status="Connected" />
+                <p style={{ fontFamily: "monospace", fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.25rem" }}>{conn.url}</p>
+              </div>
+              <button className="secondary-button" onClick={() => removeConnection(conn.id)}>Remove</button>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {(categoryFilter === "all"
+        ? CONNECTOR_CATEGORIES
+        : [categoryFilter]
+      ).map((category) => {
+        const items = filteredConnectors.filter((c) => c.category === category);
+        if (items.length === 0) return null;
+        return (
+          <section key={category} className="connector-category-block">
+            <h3 className="connector-category-title">{category}</h3>
+            <div className="connection-grid">
+              {items.map((connector) => {
+                const connected = isConnectorConnected(connector.name, saved);
+                return (
+                  <article key={connector.id}>
+                    <span className="connection-icon connection-icon-brand" aria-hidden>{connector.icon}</span>
+                    <div>
+                      <h2>{connector.name}</h2>
+                      <StatusPill status={connected ? "Connected" : "Available"} />
+                      <p>{connector.tagline}</p>
+                      <div className="connector-capabilities">
+                        {connector.capabilities.map((cap) => (
+                          <span key={cap}>{cap}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <button
+                      className={connected ? "secondary-button" : "primary-button"}
+                      onClick={() => openConnector(connector)}
+                    >
+                      {connected ? "Manage" : "Connect"}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+
+      {filteredConnectors.length === 0 && (
+        <div className="empty-state" style={{ padding: "2rem 0" }}>
+          <Search size={22} />
+          <p>No connectors match your search.</p>
+        </div>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "2rem 0 0.25rem" }}>
         <h2 style={{ fontSize: "1rem", fontWeight: 650 }}>MCP servers</h2>
@@ -450,8 +574,8 @@ function Connections() {
       {savedMcp.length > 0 && (
         <div className="connection-grid" style={{ marginBottom: "1rem" }}>
           {savedMcp.map((conn) => (
-            <article key={conn.id} style={{ borderColor: "var(--lime-dark)", background: "var(--mint)" }}>
-              <span className="connection-icon" style={{ background: "#d0f5de" }}><Server size={23} /></span>
+            <article key={conn.id} className="connection-card-connected">
+              <span className="connection-icon connection-icon-brand" style={{ background: "#d0f5de" }}><Server size={23} /></span>
               <div>
                 <h2>{conn.name}</h2>
                 <StatusPill status="Connected" />
@@ -544,26 +668,24 @@ function Analytics() {
   const total = runs.length || 1;
   const successRate = ((completed / total) * 100).toFixed(1);
   const totalCost = runs.reduce((sum, r) => sum + r.total_cost, 0);
-  const durations = runs.filter((r) => r.finished_at).map((r) => new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime());
+  const durations = runs.filter((r) => r.finished_at).map((r) => parseApiDate(r.finished_at!).getTime() - parseApiDate(r.started_at).getTime());
   const avgMin = durations.length ? (durations.reduce((a, b) => a + b, 0) / durations.length / 60000).toFixed(0) : "—";
-  const timeSaved = wfs.length > 0 ? wfs.length * 12.8 : 64.4;
-
-  const chartBars = runs.length > 0
-    ? Array.from({ length: 16 }, (_, i) => Math.min(100, 30 + i * 4 + Math.floor(runs.length * 2)))
-    : [38, 52, 48, 63, 58, 73, 67, 78, 71, 86, 82, 92, 88, 96, 91, 98];
+  const timeSaved = totalAutomationHours(runs);
+  const chartBars = dailyRunCounts(runs, 16);
+  const topWorkflows = workflowTimeSavedRanking(runs, wfs).slice(0, 4);
 
   return (
     <>
       <section className="analytics-top">
         <article>
-          <p>Estimated time saved</p>
+          <p>Automation runtime</p>
           <strong>{loading ? "…" : `${timeSaved.toFixed(1)} hrs`}</strong>
-          <span>{wfs.length > 0 ? `${wfs.length} workflows active` : "based on baselines"}</span>
+          <span>{wfs.length} workflow{wfs.length === 1 ? "" : "s"}</span>
         </article>
         <article>
           <p>Successful completion</p>
-          <strong>{loading ? "…" : `${runs.length > 0 ? successRate : "97.8"}%`}</strong>
-          <span>{completed} of {runs.length || "—"} runs</span>
+          <strong>{loading ? "…" : `${successRate}%`}</strong>
+          <span>{completed} of {runs.length} runs</span>
         </article>
         <article>
           <p>Average run duration</p>
@@ -585,22 +707,24 @@ function Analytics() {
           <div className="large-chart">
             <div className="chart-lines"><span /><span /><span /><span /></div>
             <div className="area-bars">
-              {chartBars.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}
+              {chartBars.map((height, index) => <i key={index} style={{ height: `${Math.max(height, runs.length > 0 ? 4 : 0)}%` }} />)}
             </div>
           </div>
         </article>
         <article className="panel value-panel">
           <p className="section-kicker">Top value</p>
-          <h2>Time saved by workflow</h2>
-          {(wfs.length > 0 ? wfs.slice(0, 4).map((w) => ({ name: w.name, hours: 12.8 })) : workflows.slice(0, 4).map((w) => ({ name: w.name, hours: w.timeSavedHours }))).map((item) => (
-            <div key={item.name}>
-              <span><strong>{item.name}</strong><small>{item.hours.toFixed(1)} estimated hrs</small></span>
-              <i><b style={{ width: `${Math.max(8, item.hours / 24.2 * 100)}%` }} /></i>
+          <h2>Automation runtime by workflow</h2>
+          {topWorkflows.length > 0 ? topWorkflows.map((item) => (
+            <div key={item.id}>
+              <span><strong>{item.name}</strong><small>{item.hours.toFixed(1)} hrs runtime</small></span>
+              <i><b style={{ width: `${Math.max(8, (item.hours / Math.max(topWorkflows[0]?.hours ?? 1, 0.1)) * 100)}%` }} /></i>
             </div>
-          ))}
+          )) : (
+            <p className="empty-state compact">Run a workflow to see activity here.</p>
+          )}
         </article>
       </section>
-      <p className="estimate-disclaimer">Time-saved figures are estimates based on team-provided manual baselines. They are labelled and never treated as guaranteed savings.</p>
+      <p className="estimate-disclaimer">Runtime totals are measured from completed runs. They reflect automation time, not guaranteed manual time saved.</p>
     </>
   );
 }

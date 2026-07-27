@@ -42,6 +42,20 @@ def test_workflow_crud_and_tenant_isolation(client: TestClient) -> None:
     assert deleted.status_code == 204
 
 
+def test_create_workflow_provisions_unknown_user(client: TestClient) -> None:
+    """Cognito subs are not pre-seeded; the first create should provision the user row."""
+    response = client.post(
+        "/v1/workflows",
+        json=workflow_payload("Provisioned user workflow"),
+        headers={
+            "X-WorkPilot-Tenant-ID": "tenant-northstar",
+            "X-WorkPilot-User-ID": "user-cognito-new",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["owner_id"] == "user-cognito-new"
+
+
 def test_run_is_durable_and_idempotent(client: TestClient) -> None:
     payload = {
         "input": {"client": "Northstar", "deadline": "2026-08-14"},

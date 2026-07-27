@@ -216,19 +216,24 @@ npx wrangler login                              # one-time, opens browser
 npx wrangler deploy -c dist/server/wrangler.json
 ```
 
-Set the public frontend vars on the Worker (they are read at build time from `.env`,
-and can also be set as Worker vars/secrets):
+Set these **build-time** variables in Cloudflare (Pages/Workers → Settings → Environment variables)
+or in your local `.env` before `npm run build`:
 
 ```
-NEXT_PUBLIC_CONTROL_PLANE_URL   # the AWS ALB URL
+NEXT_PUBLIC_CONTROL_PLANE_URL   # AWS ALB URL (see NEXT_PUBLIC_CONTROL_PLANE_URL_STAGING in .env)
 NEXT_PUBLIC_COGNITO_CLIENT_ID
 NEXT_PUBLIC_COGNITO_REGION
 ```
 
-> **Note:** the generated `wrangler.json` includes a placeholder D1 binding
-> (`database_id: 00000000-…`). If you enable D1-backed features, create a real
-> database (`npx wrangler d1 create workpilot`) and replace the id; otherwise the
-> binding is unused because the app talks to the AWS API.
+**D1 database:** Cloudflare rejects deploys that reference a fake D1 id. You have two modes:
+
+| Mode | `CLOUDFLARE_D1_DATABASE_ID` | `NEXT_PUBLIC_CONTROL_PLANE_URL` |
+|------|----------------------------|----------------------------------|
+| AWS backend (recommended) | leave empty | your AWS ALB URL |
+| Self-contained demo on Cloudflare | real id from `wrangler d1 create workpilot` | empty or same-origin |
+
+For AWS mode, leave `CLOUDFLARE_D1_DATABASE_ID` unset — the Worker deploys without a D1 binding
+and the UI talks to your FastAPI control plane on ECS.
 
 > **Vercel?** Not supported out of the box — Vercel expects a `next build` output,
 > but this repo produces a Cloudflare Worker. Hosting on Vercel would require

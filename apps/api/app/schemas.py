@@ -19,7 +19,14 @@ Note the ``from``/``apiVersion`` aliases: the wire format uses ``from`` and
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+
+
+def utc_iso(dt: datetime | None) -> str | None:
+    """Serialize naive UTC datetimes with an explicit Z suffix for clients."""
+    if dt is None:
+        return None
+    return f"{dt.isoformat()}Z"
 
 
 class Trigger(BaseModel):
@@ -82,6 +89,9 @@ class CanonicalWorkflow(BaseModel):
     trigger: Trigger = Field(default_factory=Trigger)
     steps: list[WorkflowStep] = Field(min_length=1, max_length=100)
     edges: list[WorkflowEdge] = Field(default_factory=list)
+    # Optional runtime override — "agentcore", "bedrock_langgraph", or "deterministic".
+    # When set, this workflow ignores the global WORKPILOT_AGENT_RUNTIME setting.
+    runtime_override: str | None = None
 
     @model_validator(mode="after")
     def validate_graph(self) -> "CanonicalWorkflow":
@@ -138,6 +148,10 @@ class WorkflowRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer("created_at", "updated_at")
+    def serialize_dt(self, value: datetime) -> str:
+        return utc_iso(value) or value.isoformat()
+
 
 class WorkflowDetail(WorkflowRead):
     version_number: int
@@ -167,11 +181,16 @@ class StepRunRead(BaseModel):
     tool_usage: dict[str, Any]
     error: str | None
 
+    @field_serializer("started_at", "finished_at")
+    def serialize_step_dt(self, value: datetime | None) -> str | None:
+        return utc_iso(value)
+
 
 class RunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     workflow_id: str
+    workflow_name: str | None = None
     workflow_version_id: str
     status: str
     trigger_type: str
@@ -183,6 +202,10 @@ class RunRead(BaseModel):
     error_summary: str | None
     trace_id: str
     steps: list[StepRunRead] = Field(default_factory=list)
+
+    @field_serializer("started_at", "finished_at")
+    def serialize_run_dt(self, value: datetime | None) -> str | None:
+        return utc_iso(value)
 
 
 class AuditRead(BaseModel):
@@ -196,3 +219,7 @@ class AuditRead(BaseModel):
     timestamp: datetime
     metadata: dict[str, Any]
     immutable_hash: str
+
+    @field_serializer("timestamp")
+    def serialize_audit_dt(self, value: datetime) -> str:
+        return utc_iso(value) or value.isoformat()

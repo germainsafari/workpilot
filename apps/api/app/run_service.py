@@ -22,11 +22,41 @@ from app.audit import record_audit
 from app.auth import Principal
 from app.executor import NativeExecutor
 from app.models import StepRun, Workflow, WorkflowRun, WorkflowVersion
+from app.runtimes.base import AgentRuntime
 from app.runtimes.factory import get_runtime
 from app.schemas import CanonicalWorkflow
 from app.telemetry import get_tracer
 
 tracer = get_tracer("workpilot.run_service")
+
+
+def _resolve_runtime(definition: CanonicalWorkflow) -> AgentRuntime:
+    """Return the right runtime for this workflow.
+
+    If the workflow definition specifies a ``runtime_override``, build that
+    runtime directly.  Otherwise fall back to the global factory (env-based).
+    """
+    override = definition.runtime_override
+    if not override:
+        return get_runtime()
+
+    from app.config import get_settings
+    settings = get_settings()
+
+    if override == "agentcore":
+        from app.runtimes.bedrock_agentcore import BedrockAgentCoreRuntime
+        return BedrockAgentCoreRuntime(
+            runtime_arn=settings.agentcore_runtime_arn,
+            region=settings.bedrock_region,
+        )
+    if override == "bedrock_langgraph":
+        from app.runtimes.bedrock_langgraph import BedrockLangGraphRuntime
+        return BedrockLangGraphRuntime(
+            model_id=settings.bedrock_model_id,
+            region=settings.bedrock_region,
+        )
+    # Unknown override — fall back to global
+    return get_runtime()
 
 
 async def execute_persisted_run(session: AsyncSession, principal: Principal, run_id: str) -> WorkflowRun:
@@ -65,7 +95,8 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
         run.status = "running"
         definition = CanonicalWorkflow.model_validate(version.canonical_definition)
         try:
-            results = await NativeExecutor(runtime=get_runtime()).execute(definition, run.trigger_payload)
+            runtime: AgentRuntime = _resolve_runtime(definition)
+            results = await NativeExecutor(runtime=runtime).execute(definition, run.trigger_payload)
             for result in results:
                 now = datetime.utcnow()
                 session.add(

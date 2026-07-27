@@ -55,8 +55,16 @@ USERS: list[dict[str, str]] = [
 # --------------------------------------------------------------------------- #
 # Canonical workflow definitions (backend-valid: ai_task/tool/condition/wait/end)
 # --------------------------------------------------------------------------- #
-def _definition(trigger: dict[str, Any], steps: list[dict[str, Any]], edges: list[dict[str, str]]) -> dict[str, Any]:
-    return {"apiVersion": "workpilot.io/v1", "kind": "Workflow", "trigger": trigger, "steps": steps, "edges": edges}
+def _definition(
+    trigger: dict[str, Any],
+    steps: list[dict[str, Any]],
+    edges: list[dict[str, str]],
+    runtime_override: str | None = None,
+) -> dict[str, Any]:
+    d: dict[str, Any] = {"apiVersion": "workpilot.io/v1", "kind": "Workflow", "trigger": trigger, "steps": steps, "edges": edges}
+    if runtime_override:
+        d["runtime_override"] = runtime_override
+    return d
 
 
 CLIENT_BRIEF = _definition(
@@ -115,6 +123,18 @@ ASSET_REVIEW = _definition(
     [{"from": "classify", "to": "gate"}, {"from": "gate", "to": "notify"}, {"from": "notify", "to": "end"}],
 )
 
+# AgentCore-powered workflow — uses AWS AgentCore managed runtime instead of LangGraph
+AGENTCORE_DEMO = _definition(
+    {"type": "manual", "label": "Run on AgentCore"},
+    [
+        {"id": "analyze", "name": "Analyze with AgentCore", "type": "ai_task", "task": "extract"},
+        {"id": "summarize", "name": "Summarize findings", "type": "ai_task", "task": "summarize"},
+        {"id": "end", "name": "Analysis complete", "type": "end", "outcome": "completed"},
+    ],
+    [{"from": "analyze", "to": "summarize"}, {"from": "summarize", "to": "end"}],
+    runtime_override="agentcore",
+)
+
 
 WORKFLOWS: list[dict[str, Any]] = [
     {
@@ -156,6 +176,14 @@ WORKFLOWS: list[dict[str, Any]] = [
         "definition": ASSET_REVIEW,
         "explanation": "Classifies each new asset against delivery rules and routes exceptions to a reviewer in safe mode.",
         "created": 48, "runs": 31,
+    },
+    {
+        "id": "wf-agentcore-demo", "name": "AgentCore AI analysis",
+        "description": "Runs a two-step AI analysis using AWS AgentCore — a fully managed agent microVM.",
+        "department": "Operations", "owner_id": "user-alex", "status": "active", "risk_level": "low",
+        "definition": AGENTCORE_DEMO,
+        "explanation": "Sends input to an AWS AgentCore managed runtime, which calls Amazon Nova Micro and returns a structured analysis.",
+        "created": 1, "runs": 0,
     },
 ]
 

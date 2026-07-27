@@ -25,6 +25,34 @@ const clientBriefDefinition: WorkflowSummary["definition"] = {
 
 export const workflows: WorkflowSummary[] = [
   {
+    id: "wf-agentcore-demo",
+    name: "AgentCore AI analysis",
+    description: "Runs a two-step AI analysis using AWS AgentCore — a fully managed agent microVM.",
+    department: "Operations",
+    owner: "Alex Morgan",
+    status: "active",
+    riskLevel: "low",
+    trigger: "Manual start",
+    runsThisMonth: 0,
+    successRate: 0,
+    timeSavedHours: 0,
+    lastRun: "Not run yet",
+    definition: {
+      apiVersion: "workpilot.io/v1",
+      kind: "Workflow",
+      trigger: { type: "manual", label: "Run on AgentCore" },
+      steps: [
+        { id: "analyze", name: "Analyze with AgentCore", type: "ai_task", summary: "Sends the input to AWS AgentCore, which runs the agent code in a managed microVM and returns a structured result.", position: { x: 30, y: 150 } },
+        { id: "summarize", name: "Summarize findings", type: "ai_task", summary: "Takes the AgentCore output and produces a concise summary of findings.", position: { x: 310, y: 150 } },
+        { id: "end", name: "Analysis complete", type: "end", summary: "Stores the final analysis and marks the run as completed.", position: { x: 590, y: 150 } },
+      ],
+      edges: [
+        { id: "e1", source: "analyze", target: "summarize" },
+        { id: "e2", source: "summarize", target: "end" },
+      ],
+    },
+  },
+  {
     id: "wf-client-brief",
     name: "Client brief processor",
     description: "Turns incoming requests into an approved, delivery-ready project brief.",

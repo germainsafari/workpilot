@@ -30,6 +30,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         from app.seed import seed
 
         await seed()
+    from app.bootstrap_workflows import bootstrap_workflows
+
+    await bootstrap_workflows()
     yield
 
 

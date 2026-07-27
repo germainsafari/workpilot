@@ -39,6 +39,8 @@ class Principal:
     tenant_id: str
     user_id: str
     role: str
+    email: str | None = None
+    name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +154,16 @@ def _verify_cognito_token(token: str) -> Principal:
     tenant_id: str = str(payload.get("custom:tenant_id") or payload["sub"])
     role: str = str(payload.get("custom:role") or "workflow_user")
     user_id: str = str(payload["sub"])
+    email = payload.get("email")
+    name = payload.get("name") or payload.get("cognito:username")
 
-    return Principal(tenant_id=tenant_id, user_id=user_id, role=role)
+    return Principal(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=role,
+        email=str(email) if email else None,
+        name=str(name) if name else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +182,8 @@ def _verify_hs256_token(token: str) -> Principal:
             tenant_id=str(payload["tenant_id"]),
             user_id=str(payload["sub"]),
             role=str(payload["role"]),
+            email=str(payload["email"]) if payload.get("email") else None,
+            name=str(payload["name"]) if payload.get("name") else None,
         )
     except (jwt.InvalidTokenError, KeyError) as exc:
         raise HTTPException(

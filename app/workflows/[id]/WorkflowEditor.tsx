@@ -50,7 +50,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, formatDuration, formatRelativeTime, type ApiRun } from "../../../lib/api";
+import { api, formatDuration, formatRelativeTime, parseApiDate, type ApiRun } from "../../../lib/api";
 import type { StepType, WorkflowSummary } from "../../../lib/types";
 import { StatusPill } from "../../components/StatusPill";
 
@@ -100,6 +100,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
   const [activeRun, setActiveRun] = useState<ApiRun | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [showTestDrawer, setShowTestDrawer] = useState(false);
+  const [activityRefresh, setActivityRefresh] = useState(0);
 
   const onConnect = useCallback((connection: Connection) => {
     setEdges((cur) => addEdge({ ...connection, type: "smoothstep" }, cur));
@@ -122,6 +123,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
     try {
       const run = await api.runs.trigger(workflow.id, { source: "workpilot_ui_test" });
       setActiveRun(run);
+      setActivityRefresh((value) => value + 1);
     } catch (err) {
       setRunError(err instanceof Error ? err.message : "Run failed");
     }
@@ -206,7 +208,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
       </div>}
 
       {tab === "explain" && <Explanation workflow={workflow} />}
-      {tab === "activity" && <Activity workflowId={workflow.id} />}
+      {tab === "activity" && <Activity workflowId={workflow.id} refreshKey={activityRefresh} />}
 
       {showTestDrawer && (
         <LiveTestDrawer
@@ -239,26 +241,38 @@ function Explanation({ workflow }: { workflow: WorkflowSummary }) {
   return <div className="explanation-page"><div className="explanation-main"><div className="explanation-hero"><span><MessageSquareText size={22} /></span><div><p className="eyebrow">In plain language</p><h2>What this workflow does</h2><p>{workflow.description} Every action stays in safe test mode until a person approves publication.</p></div></div><div className="explanation-sections"><section><span>1</span><div><h3>What starts it</h3><p>A new client brief arrives through the connected form. WorkPilot records who submitted it and when.</p></div></section><section><span>2</span><div><h3>What it reads and prepares</h3><p>It reads only the submitted brief, then organizes deliverables, markets, dates, languages, and constraints.</p></div></section><section><span>3</span><div><h3>Where a person stays in control</h3><p>The account manager must review the standardized brief before any project tasks can be prepared.</p></div></section><section><span>4</span><div><h3>When something goes wrong</h3><p>The run retries once. If the issue remains, it pauses and tells the workflow owner without repeating completed actions.</p></div></section></div></div><aside className="explanation-aside"><h3>Safeguards</h3><div><ShieldCheck size={17} /><span><strong>No live writes in tests</strong><small>Connected tools are never changed during a safe test.</small></span></div><div><Hand size={17} /><span><strong>Human approval required</strong><small>Project tasks wait for an account manager.</small></span></div><div><LockKeyhole size={17} /><span><strong>Limited data access</strong><small>Only client brief fields are available to this workflow.</small></span></div><hr /><h3>Estimated usage</h3><p className="estimate"><strong>$1.60–$2.10</strong><small>per 100 completed briefs</small></p><p className="estimate"><strong>24 minutes</strong><small>estimated manual time saved per brief</small></p></aside></div>;
 }
 
-function Activity({ workflowId }: { workflowId: string }) {
+function Activity({ workflowId, refreshKey }: { workflowId: string; refreshKey: number }) {
   const [runs, setRuns] = useState<ApiRun[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     api.runs.list().then((all) => {
       setRuns(all.filter((r) => r.workflow_id === workflowId));
     }).catch(() => setRuns([])).finally(() => setLoading(false));
-  }, [workflowId]);
+  }, [workflowId, refreshKey]);
 
   const completed = runs.filter((r) => r.status === "completed").length;
   const totalCost = runs.reduce((sum, r) => sum + r.total_cost, 0);
-  const durations = runs.filter((r) => r.finished_at).map((r) => new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime());
+  const durations = runs.filter((r) => r.finished_at).map((r) => parseApiDate(r.finished_at!).getTime() - parseApiDate(r.started_at).getTime());
   const avgMs = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
+  const avgLabel = avgMs >= 60_000
+    ? `${Math.floor(avgMs / 60_000)}m ${Math.round((avgMs % 60_000) / 1000)}s`
+    : avgMs >= 1000
+      ? `${(avgMs / 1000).toFixed(1)}s`
+      : avgMs > 0
+        ? `${Math.round(avgMs)}ms`
+        : "—";
+  const lastRun = runs.length > 0
+    ? formatRelativeTime(runs.reduce((a, b) => parseApiDate(a.started_at) > parseApiDate(b.started_at) ? a : b).started_at)
+    : "Not run yet";
 
   return <div className="activity-page">
     <div className="activity-summary">
       <div><CheckCircle2 size={19} /><span><strong>{completed}/{runs.length}</strong><small>completed</small></span></div>
-      <div><Clock3 size={19} /><span><strong>{avgMs > 0 ? formatDuration(new Date(Date.now() - avgMs).toISOString(), new Date().toISOString()) : "—"}</strong><small>avg duration</small></span></div>
+      <div><Clock3 size={19} /><span><strong>{avgLabel}</strong><small>avg duration</small></span></div>
       <div><Gauge size={19} /><span><strong>${totalCost.toFixed(4)}</strong><small>total AI cost</small></span></div>
+      <div><History size={19} /><span><strong>{lastRun}</strong><small>last run</small></span></div>
     </div>
     <section className="panel">
       <div className="panel-heading"><div><p className="section-kicker">Execution history</p><h2>Recent runs</h2></div></div>

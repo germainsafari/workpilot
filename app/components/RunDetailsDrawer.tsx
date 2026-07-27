@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { api, formatDuration, formatRelativeTime, type ApiRun } from "../../lib/api";
+import { api, formatDuration, formatRelativeTime, runWorkflowLabel, type ApiRun } from "../../lib/api";
 import { StatusPill } from "./StatusPill";
 
 function prettyJson(value: unknown): string {
@@ -147,8 +147,8 @@ export function RunDetailsDrawer({
             <Link href={`/workflows/${run.workflow_id}`} className="run-workflow-link">
               <WorkflowIcon size={16} />
               <span>
-                <strong>{run.workflow_id}</strong>
-                <small>Open workflow</small>
+                <strong>{runWorkflowLabel(run)}</strong>
+                <small>Open workflow · {run.workflow_id}</small>
               </span>
             </Link>
 

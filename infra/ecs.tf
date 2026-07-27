@@ -145,6 +145,10 @@ resource "aws_ecs_task_definition" "api" {
         {
           name  = "WORKPILOT_BEDROCK_REGION"
           value = local.region
+        },
+        {
+          name  = "WORKPILOT_AGENTCORE_RUNTIME_ARN"
+          value = var.agentcore_runtime_arn
         }
       ]
 

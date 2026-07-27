@@ -18,6 +18,22 @@ from app.schemas import AuditRead, RunCreate, RunRead
 router = APIRouter(tags=["Runs"])
 
 
+def _run_read(run: WorkflowRun, workflow_name: str | None = None) -> RunRead:
+    payload = RunRead.model_validate(run)
+    if workflow_name is not None:
+        return payload.model_copy(update={"workflow_name": workflow_name})
+    return payload
+
+
+async def _workflow_name_map(session: AsyncSession, tenant_id: str, workflow_ids: set[str]) -> dict[str, str]:
+    if not workflow_ids:
+        return {}
+    rows = await session.scalars(
+        select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.id.in_(workflow_ids))
+    )
+    return {row.id: row.name for row in rows}
+
+
 @router.post("/workflows/{workflow_id}/runs", response_model=RunRead, status_code=status.HTTP_201_CREATED)
 async def create_run(
     workflow_id: str,
@@ -57,7 +73,13 @@ async def create_run(
 
     settings = get_settings()
     if settings.execute_runs_inline:
-        return await execute_persisted_run(session, principal, run.id)
+        executed = await execute_persisted_run(session, principal, run.id)
+        name = await session.scalar(
+            select(Workflow.name).where(
+                Workflow.id == executed.workflow_id, Workflow.tenant_id == principal.tenant_id
+            )
+        )
+        return _run_read(executed, name)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         await redis.rpush("workpilot:runs", json.dumps(await queue_payload(run.id, principal)))
@@ -69,7 +91,13 @@ async def create_run(
         .options(selectinload(WorkflowRun.steps))
         .execution_options(populate_existing=True)
     )
-    return created or run
+    resolved = created or run
+    name = await session.scalar(
+        select(Workflow.name).where(
+            Workflow.id == resolved.workflow_id, Workflow.tenant_id == principal.tenant_id
+        )
+    )
+    return _run_read(resolved, name)
 
 
 @router.get("/runs", response_model=list[RunRead])
@@ -83,7 +111,9 @@ async def list_runs(
         .order_by(WorkflowRun.started_at.desc())
         .limit(100)
     )
-    return list(result.unique())
+    runs = list(result.unique())
+    names = await _workflow_name_map(session, principal.tenant_id, {run.workflow_id for run in runs})
+    return [_run_read(run, names.get(run.workflow_id)) for run in runs]
 
 
 @router.get("/runs/{run_id}", response_model=RunRead)
@@ -99,7 +129,10 @@ async def get_run(
     )
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    name = await session.scalar(
+        select(Workflow.name).where(Workflow.id == run.workflow_id, Workflow.tenant_id == principal.tenant_id)
+    )
+    return _run_read(run, name)
 
 
 @router.get("/runs/{run_id}/audit", response_model=list[AuditRead])

@@ -1,67 +1,54 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, Filter, MoreHorizontal, Plus, Search, ShieldCheck, TimerReset, Workflow as WorkflowIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { api, formatRelativeTime, type ApiWorkflow } from "../../lib/api";
+import { ArrowRight, Filter, LoaderCircle, MoreHorizontal, Plus, Search, ShieldCheck, TimerReset, Workflow as WorkflowIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, type ApiRun, type ApiWorkflow } from "../../lib/api";
 import type { WorkflowSummary } from "../../lib/types";
+import { apiWorkflowToSummary } from "../../lib/workflow-mapper";
+import { enrichWorkflowSummaries } from "../../lib/workflow-stats";
 import { StatusPill } from "../components/StatusPill";
-
-function mergeApiWorkflow(demo: WorkflowSummary, live: ApiWorkflow): WorkflowSummary {
-  return {
-    ...demo,
-    name: live.name,
-    description: live.description,
-    department: live.department,
-    status: live.status as WorkflowSummary["status"],
-    riskLevel: live.risk_level as WorkflowSummary["riskLevel"],
-    lastRun: formatRelativeTime(live.updated_at),
-  };
-}
-
-function apiOnlyWorkflow(live: ApiWorkflow): WorkflowSummary {
-  return {
-    id: live.id,
-    name: live.name,
-    description: live.description,
-    department: live.department,
-    owner: live.owner_id,
-    status: live.status as WorkflowSummary["status"],
-    riskLevel: live.risk_level as WorkflowSummary["riskLevel"],
-    trigger: "Manual",
-    runsThisMonth: 0,
-    successRate: 0,
-    timeSavedHours: 0,
-    lastRun: formatRelativeTime(live.updated_at),
-    definition: {
-      apiVersion: "workpilot.io/v1",
-      kind: "Workflow",
-      trigger: { type: "manual", label: "Manual start" },
-      steps: [],
-      edges: [],
-    },
-  };
-}
 
 export function WorkflowList({ initialWorkflows }: { initialWorkflows: WorkflowSummary[] }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>(initialWorkflows);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [liveCount, setLiveCount] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadWorkflows = useCallback(() => {
+    setLoading(true);
+    return Promise.all([
+      api.workflows.list(),
+      api.runs.list().catch(() => [] as ApiRun[]),
+    ])
+      .then(([liveList, runs]) => {
+        setLiveCount(liveList.length);
+        const summaries = enrichWorkflowSummaries(
+          liveList.map((live: ApiWorkflow) => apiWorkflowToSummary(live)),
+          runs,
+        );
+        setWorkflows(summaries.sort((a, b) => {
+          if (a.status === "draft" && b.status !== "draft") return -1;
+          if (b.status === "draft" && a.status !== "draft") return 1;
+          return a.name.localeCompare(b.name);
+        }));
+      })
+      .catch(() => {
+        if (initialWorkflows.length > 0) setWorkflows(initialWorkflows);
+      })
+      .finally(() => setLoading(false));
+  }, [initialWorkflows]);
 
   useEffect(() => {
-    api.workflows.list().then((liveList) => {
-      setLiveCount(liveList.length);
-      setWorkflows(() => {
-        const demoById = new Map(initialWorkflows.map((w) => [w.id, w]));
-        const merged: WorkflowSummary[] = liveList.map((live) => {
-          const demo = demoById.get(live.id);
-          return demo ? mergeApiWorkflow(demo, live) : apiOnlyWorkflow(live);
-        });
-        return merged;
-      });
-    }).catch(() => {/* keep demo data on network error */});
-  }, [initialWorkflows]);
+    loadWorkflows();
+    const refresh = () => loadWorkflows();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") refresh();
+    });
+    return () => window.removeEventListener("focus", refresh);
+  }, [loadWorkflows]);
 
   const filtered = useMemo(() => workflows.filter((w) => {
     const matchesQuery = `${w.name} ${w.description} ${w.department}`.toLowerCase().includes(query.toLowerCase());
@@ -83,9 +70,9 @@ export function WorkflowList({ initialWorkflows }: { initialWorkflows: WorkflowS
         <Link href="/workflows/new" className="primary-button"><Plus size={18} />Create workflow</Link>
       </section>
       <section className="summary-strip">
-        <div><WorkflowIcon size={19} /><span><strong>{liveCount ?? workflows.length}</strong><small>Total workflows</small></span></div>
-        <div><ShieldCheck size={19} /><span><strong>{activeCount} active</strong><small>Running with safeguards</small></span></div>
-        <div><TimerReset size={19} /><span><strong>{totalHours.toFixed(1)} hrs</strong><small>Estimated time saved</small></span></div>
+        <div><WorkflowIcon size={19} /><span><strong>{loading ? "…" : liveCount ?? workflows.length}</strong><small>Total workflows</small></span></div>
+        <div><ShieldCheck size={19} /><span><strong>{loading ? "…" : activeCount}</strong><small>Active</small></span></div>
+        <div><TimerReset size={19} /><span><strong>{loading ? "…" : `${totalHours.toFixed(1)} hrs`}</strong><small>Automation runtime</small></span></div>
       </section>
       <section className="list-toolbar">
         <div className="filter-tabs" role="tablist" aria-label="Workflow status">
@@ -104,7 +91,9 @@ export function WorkflowList({ initialWorkflows }: { initialWorkflows: WorkflowS
         </div>
       </section>
       <section className="workflow-list" aria-live="polite">
-        {filtered.map((workflow) => (
+        {loading && workflows.length === 0 ? (
+          <div className="empty-state"><LoaderCircle size={24} className="spin" /><p>Loading workflows…</p></div>
+        ) : filtered.map((workflow) => (
           <article className="workflow-row" key={workflow.id}>
             <Link href={`/workflows/${workflow.id}`} className="workflow-row-main">
               <span className={`workflow-symbol risk-${workflow.riskLevel}`}><WorkflowIcon size={20} /></span>
@@ -125,7 +114,7 @@ export function WorkflowList({ initialWorkflows }: { initialWorkflows: WorkflowS
             <button className="icon-button" aria-label={`More actions for ${workflow.name}`}><MoreHorizontal size={18} /></button>
           </article>
         ))}
-        {filtered.length === 0 && (
+        {!loading && filtered.length === 0 && (
           <div className="empty-state"><Search size={24} /><h3>No workflows found</h3><p>Try a different name or status.</p></div>
         )}
       </section>

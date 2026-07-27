@@ -33,7 +33,7 @@ def normalize_database_url(url: str) -> tuple[str, dict[str, Any]]:
 
     connect_args: dict[str, Any] = {}
     host = parts.hostname or ""
-    is_local = host in {"localhost", "127.0.0.1", "::1", ""}
+    is_local = host in {"localhost", "127.0.0.1", "::1", "", "postgres"}
     if sslmode == "disable":
         connect_args["ssl"] = False
     elif sslmode or not is_local:

@@ -38,3 +38,9 @@ variable "certificate_arn" {
   type        = string
   default     = ""
 }
+
+variable "agentcore_runtime_arn" {
+  description = "Bedrock AgentCore runtime ARN for workflows with runtime_override=agentcore"
+  type        = string
+  default     = ""
+}

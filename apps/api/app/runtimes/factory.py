@@ -12,6 +12,13 @@ def get_runtime() -> AgentRuntime:
             model_id=settings.bedrock_model_id,
             region=settings.bedrock_region,
         )
+    if settings.agent_runtime == "agentcore":
+        from app.runtimes.bedrock_agentcore import BedrockAgentCoreRuntime
+
+        return BedrockAgentCoreRuntime(
+            runtime_arn=settings.agentcore_runtime_arn,
+            region=settings.bedrock_region,
+        )
     from app.runtimes.deterministic import DeterministicRuntime
 
     return DeterministicRuntime()

@@ -2,6 +2,8 @@
 
 import { Check, ExternalLink, Key, Link2, LoaderCircle, Server, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { normalizeMcpEndpoint, persistConnection } from "../../lib/connections";
+import { resolveKnownService } from "../../lib/connectors";
 
 export interface SavedConnection {
   id: string;
@@ -24,97 +26,6 @@ interface Props {
 
 type Phase = "form" | "probing" | "success" | "error";
 
-interface KnownService {
-  label: string;
-  icon: string;
-  hostname: string; // hostname suffix used for URL detection
-  urlPlaceholder: string;
-  tokenHelp: string;
-  tokenLinkLabel: string;
-  tokenLinkPath: string; // appended to the scheme+host of the entered URL
-  fallbackTokenUrl: string; // used when no site URL is entered yet
-  steps: string[]; // ordered, plain-language connect instructions
-}
-
-// Known services — detected by hostname in the URL or by display name.
-// Shows a branded, step-by-step guide so the user knows exactly what to do.
-const KNOWN_SERVICES: Record<string, KnownService> = {
-  scoro: {
-    label: "Scoro",
-    icon: "🔷",
-    hostname: "scoro.com",
-    urlPlaceholder: "https://yourcompany.scoro.com",
-    tokenHelp: "Scoro doesn't use a login-and-authorise popup — it authorises apps with a personal API token. Create one in Scoro and paste it below. WorkPilot then acts on your behalf using that token.",
-    tokenLinkLabel: "Open Scoro API settings →",
-    tokenLinkPath: "/settings/apiIntegrations/",
-    fallbackTokenUrl: "https://www.scoro.com/support/api/",
-    steps: [
-      "Enter your Scoro site address above (e.g. https://yourcompany.scoro.com).",
-      "Open your Scoro site → Settings → Administration → API. Use the link below to jump there.",
-      "Create a new API token (or copy an existing one).",
-      "Paste the token into the field below, then press “Test & connect”.",
-    ],
-  },
-  notion: {
-    label: "Notion",
-    icon: "📓",
-    hostname: "notion.com",
-    urlPlaceholder: "https://api.notion.com",
-    tokenHelp: "Notion authorises apps with an internal integration secret. Create one, share the pages you want WorkPilot to read, then paste the secret below.",
-    tokenLinkLabel: "Open Notion integrations →",
-    tokenLinkPath: "/my-integrations",
-    fallbackTokenUrl: "https://www.notion.so/my-integrations",
-    steps: [
-      "Open notion.so/my-integrations and create a new internal integration.",
-      "Copy the “Internal Integration Secret”.",
-      "In Notion, share the pages/databases with your new integration.",
-      "Paste the secret below, then press “Test & connect”.",
-    ],
-  },
-  slack: {
-    label: "Slack",
-    icon: "💬",
-    hostname: "slack.com",
-    urlPlaceholder: "https://slack.com/api",
-    tokenHelp: "Slack authorises apps with a Bot Token (starts with xoxb-). Create an app, add scopes, install it to your workspace, then paste the token below.",
-    tokenLinkLabel: "Open Slack apps →",
-    tokenLinkPath: "/apps",
-    fallbackTokenUrl: "https://api.slack.com/apps",
-    steps: [
-      "Open api.slack.com/apps and create (or select) an app.",
-      "Add the scopes you need under “OAuth & Permissions” and install to your workspace.",
-      "Copy the “Bot User OAuth Token” (starts with xoxb-).",
-      "Paste the token below, then press “Test & connect”.",
-    ],
-  },
-};
-
-function resolveService(url: string, name: string): (KnownService & { tokenUrl: string }) | null {
-  // 1. Match by the hostname of the entered URL (most precise).
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.replace(/^www\./, "");
-    for (const service of Object.values(KNOWN_SERVICES)) {
-      if (hostname.endsWith(service.hostname)) {
-        return { ...service, tokenUrl: parsed.origin + service.tokenLinkPath };
-      }
-    }
-  } catch { /* invalid or empty URL while typing */ }
-
-  // 2. Fall back to matching by display name (so "Connect Scoro" works before a URL is typed).
-  const key = name.trim().toLowerCase();
-  const byName = KNOWN_SERVICES[key];
-  if (byName) {
-    // If a URL is present and valid, anchor the token link to it; otherwise use the docs fallback.
-    let tokenUrl = byName.fallbackTokenUrl;
-    try {
-      tokenUrl = new URL(url).origin + byName.tokenLinkPath;
-    } catch { /* keep fallback */ }
-    return { ...byName, tokenUrl };
-  }
-  return null;
-}
-
 export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose, onSave }: Props) {
   const [name, setName] = useState(defaultName);
   const [url, setUrl] = useState(defaultUrl);
@@ -124,7 +35,7 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
   const [tools, setTools] = useState<string[]>([]);
   const urlRef = useRef<HTMLInputElement>(null);
 
-  const service = resolveService(url, name);
+  const service = resolveKnownService(url, name);
 
   useEffect(() => { urlRef.current?.focus(); }, []);
 
@@ -139,7 +50,11 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
     setPhase("probing");
     setErrMsg("");
 
-    const endpoint = url.trim().replace(/\/$/, "");
+    const trimmed = url.trim();
+    const endpoint = normalizeMcpEndpoint(trimmed, service?.hostname);
+    if (endpoint !== trimmed.replace(/\/$/, "")) {
+      setUrl(endpoint);
+    }
     const mcpHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
@@ -225,20 +140,32 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
   };
 
   const save = () => {
+    if (!url.trim()) {
+      setErrMsg("URL is required");
+      setPhase("error");
+      return;
+    }
+
+    const endpoint = normalizeMcpEndpoint(url.trim(), service?.hostname);
     const conn: SavedConnection = {
       id: crypto.randomUUID(),
-      name: name.trim() || url,
-      url: url.trim(),
-      type,
+      name: name.trim() || endpoint,
+      url: endpoint,
+      type: type === "app" && service?.hostname === "scoro.com" ? "mcp" : type,
       token: token || undefined,
-      status: "connected",
+      status: phase === "error" ? "error" : "connected",
       tools: tools.length ? tools : undefined,
       connectedAt: new Date().toISOString(),
     };
-    const stored = JSON.parse(localStorage.getItem("wp-connections") ?? "[]") as SavedConnection[];
-    localStorage.setItem("wp-connections", JSON.stringify([...stored, conn]));
-    onSave(conn);
-    onClose();
+
+    try {
+      persistConnection(conn);
+      onSave(conn);
+      onClose();
+    } catch {
+      setPhase("error");
+      setErrMsg("Could not save this connection. Check that your browser allows local storage.");
+    }
   };
 
   return (
@@ -332,6 +259,8 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
           <button className="secondary-button" onClick={onClose}>Cancel</button>
           {phase === "success" ? (
             <button className="primary-button" onClick={save}><Check size={15} />Save connection</button>
+          ) : phase === "error" ? (
+            <button className="primary-button" onClick={save}><Check size={15} />Save anyway</button>
           ) : (
             <button className="primary-button" onClick={probe} disabled={phase === "probing" || !url.trim()}>
               {phase === "probing"

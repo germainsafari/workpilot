@@ -39,6 +39,12 @@ services:
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
       WORKPILOT_EXECUTE_RUNS_INLINE: "false"
+      WORKPILOT_AGENT_RUNTIME: bedrock_langgraph
+      WORKPILOT_AGENTCORE_RUNTIME_ARN: ${WORKPILOT_AGENTCORE_RUNTIME_ARN:-}
+      WORKPILOT_LOCAL_AUTH_ENABLED: "true"
+      WORKPILOT_CORS_ORIGINS: ${WORKPILOT_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+    volumes:
+      - ${USERPROFILE:-~}/.aws:/root/.aws:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,6 +69,10 @@ services:
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
       WORKPILOT_EXECUTE_RUNS_INLINE: "false"
+      WORKPILOT_AGENT_RUNTIME: bedrock_langgraph
+      WORKPILOT_AGENTCORE_RUNTIME_ARN: ${WORKPILOT_AGENTCORE_RUNTIME_ARN:-}
+    volumes:
+      - ${USERPROFILE:-~}/.aws:/root/.aws:ro
     depends_on:
       api:
         condition: service_healthy
