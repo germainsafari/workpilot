@@ -1,10 +1,308 @@
 # WorkPilot
 
-WorkPilot is a no-code agentic operations platform — a studio where non-technical teams describe business processes as visual workflows, test them safely with real AI, and monitor every run with full cost and audit transparency.
+WorkPilot is a **no-code agentic operations platform** — a studio where non-technical teams describe business processes as visual workflows, test them safely with real AI, and monitor every run with full cost and audit transparency.
+
+**Positioning:** *WorkPilot is the studio where teams turn business processes into governed AI workflows — design visually, test safely, run with real models, and audit everything.*
 
 **Live deployment:** set `NEXT_PUBLIC_CONTROL_PLANE_URL_STAGING` in your local `.env`  
 **AI runtime:** Amazon Bedrock · Amazon Nova Micro (eu-central-1 cross-region inference)  
 **Auth:** AWS Cognito user pool (eu-central-1)
+
+---
+
+## Table of contents
+
+- [What WorkPilot solves](#what-workpilot-solves)
+- [Architecture](#architecture)
+- [Tech stack](#tech-stack)
+- [Core concepts](#core-concepts)
+- [Execution pipeline](#execution-pipeline)
+- [AI runtimes](#ai-runtimes)
+- [Product areas](#product-areas)
+- [Authentication and multi-tenancy](#authentication-and-multi-tenancy)
+- [Data model](#data-model)
+- [What's real vs. simulated](#whats-real-vs-simulated)
+- [Repository layout](#repository-layout)
+- [How to run](#how-to-run)
+- [What you can do right now](#what-you-can-do-right-now)
+- [Suggested demo script](#suggested-demo-script)
+- [MCP server integration](#mcp-server-integration)
+- [Viewing logs](#viewing-logs)
+- [Deploy for everyone (production)](#deploy-for-everyone-production)
+- [Environment variables](#environment-variables)
+- [AI models](#ai-models)
+- [Architecture decisions](#architecture-decisions)
+- [Checks](#checks)
+- [Security notes](#security-notes)
+
+---
+
+## What WorkPilot solves
+
+| Pain point | WorkPilot answer |
+|---|---|
+| Business users can't write code or prompts | Visual workflow builder + plain-language explanations |
+| AI agents are opaque and risky | Every step is typed, validated, and logged; writes are gated |
+| No visibility into AI cost | Per-run and per-step token/cost tracking |
+| Hard to connect to existing tools | MCP (Model Context Protocol) servers + business connectors |
+| Compliance / audit needs | Hash-chained, tenant-scoped audit trail |
+
+**Target users:** non-technical operations, account, finance, or project teams (demo tenant: *Northstar Projects*).
+
+---
+
+## Architecture
+
+WorkPilot uses a **two-layer design**:
+
+1. **Product UI** — Next.js 16 app built with **vinext** (compiles to a **Cloudflare Worker**, not standard Vercel Next.js output).
+2. **Control plane** — Python **FastAPI** API (`apps/api`) that owns workflows, runs, auth, execution, and audit.
+
+The UI is **backend-agnostic**: it talks to FastAPI on AWS/local via `NEXT_PUBLIC_CONTROL_PLANE_URL`, or falls back to same-origin demo data / Cloudflare D1.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Frontend (Next.js / vinext)                                    │
+│  React UI + React Flow canvas                                   │
+│  /api/control-plane proxy  │  optional Cloudflare D1 /v1 routes │
+└───────────────┬─────────────────────────────┬───────────────────┘
+                │                             │
+                ▼                             ▼
+┌───────────────────────────┐     ┌───────────────────────────────┐
+│  AWS (staging/production) │     │  Local (Docker Compose)       │
+│  ALB → ECS Fargate (API)  │     │  PostgreSQL + Redis           │
+│  Redis worker             │     │  FastAPI :8000 + Web :3000    │
+│  Cognito · Bedrock        │     │                               │
+│  CloudWatch + X-Ray       │     │                               │
+└───────────────────────────┘     └───────────────────────────────┘
+```
+
+**Cross-origin proxy:** When the UI is HTTPS (Cloudflare) and the API is HTTP (ALB), browser calls go through `/api/control-plane` to avoid mixed-content and CORS issues.
+
+---
+
+## Tech stack
+
+### Frontend
+
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 16 + React 19 |
+| Build / deploy | **vinext** + Vite + Cloudflare Workers plugin |
+| Visual editor | **@xyflow/react** (React Flow) — pan, zoom, drag, connect steps |
+| Styling | Tailwind CSS 4 |
+| Validation | Zod |
+| Local DB option | Drizzle ORM + Cloudflare D1 (SQLite) |
+
+### Backend (control plane)
+
+| Layer | Technology |
+|---|---|
+| API | FastAPI + Pydantic v2 |
+| ORM | SQLAlchemy async |
+| Migrations | Alembic |
+| Database | PostgreSQL (primary) |
+| Queue | Redis (`workpilot:runs` list) |
+| Logging | structlog |
+| Observability | OpenTelemetry → AWS X-Ray / CloudWatch (optional) |
+
+### AI and agents
+
+| Runtime | When used |
+|---|---|
+| `deterministic_mock` | Local dev, tests — predictable outputs, $0 cost |
+| `bedrock_langgraph` | Real AI via **LangGraph ReAct agent** + **Amazon Bedrock** (Nova Micro default) |
+| `agentcore` | **Bedrock AgentCore** runtime (Docker default for AWS-style runs) |
+
+### Infrastructure (AWS, eu-central-1)
+
+- **Terraform** in `infra/`: VPC, ALB, ECS Fargate, ECR, Cognito, Secrets Manager, IAM
+- **Auth:** AWS Cognito JWT (RS256) in staging/production
+- **AI:** Amazon Nova Micro (`eu.amazon.nova-micro-v1:0`) — typically $0.0003–$0.001 per test run
+
+See [`infra/README.md`](infra/README.md) for Terraform usage.
+
+---
+
+## Core concepts
+
+Everything revolves around a versioned schema: **`workpilot.io/v1`**.
+
+Stored in `workflow_versions.canonical_definition` as JSON, validated by Pydantic before every save and every run. Workflows are **not** stored as LangGraph/CrewAI code — they are declarative JSON. The **Native Executor** walks the graph deterministically; AI is only invoked inside typed `ai_task` steps.
+
+### Step types
+
+| Type | Purpose |
+|---|---|
+| `ai_task` | LLM does structured work: extract, summarize, classify, prepare |
+| `tool` | Calls external system via MCP (read or write) |
+| `condition` | Branch on truthiness (`ready`/`yes` vs `missing`/`no`) |
+| `wait` | Pause (timed or event-based) |
+| `end` | Terminal state |
+
+### Example flow (Client brief processor)
+
+```
+Trigger → AI extract fields → Condition (deadline missing?)
+   → yes: end with flag
+   → no: AI prepare tasks → end
+```
+
+Step output is threaded through the run context. Argument templates like `{{fetchProjects.result}}` resolve against earlier step outputs.
+
+---
+
+## Execution pipeline
+
+When a user clicks **Test safely**:
+
+1. `POST /v1/workflows/{id}/runs` (with idempotency key)
+2. Run row created in PostgreSQL
+3. Either:
+   - **Inline execution** (local dev: `WORKPILOT_EXECUTE_RUNS_INLINE=true`)
+   - **OR** pushed to Redis queue → worker consumes
+4. `execute_persisted_run()`:
+   - Re-validates canonical definition
+   - Builds `NativeExecutor` with chosen `AgentRuntime`
+   - Walks graph step-by-step
+   - Persists `StepRun` per step (input, output, model_usage, tool_usage)
+   - Updates run status, total_cost, token_usage
+   - Writes audit event (`run.completed` / `run.failed`)
+5. UI polls run status → RunDetailsDrawer shows step timeline + cost
+
+### Safety invariants
+
+- **Tenant scoping** on every database query
+- **Idempotency keys** prevent duplicate runs
+- **Cycle detection** — workflows can't loop forever
+- **Tool writes refused** unless explicitly allowed (`WORKPILOT_ALLOW_TOOL_WRITES`)
+- **Safe mode / dry-run** default for external writes
+- **Hash-chained audit** — each event links to the previous hash (tamper-evident per tenant)
+
+---
+
+## AI runtimes
+
+### Deterministic mock
+
+Returns predictable JSON for extract/summarize/classify/prepare. Zero cost. Used in tests and offline demo.
+
+### Bedrock + LangGraph (real AI)
+
+- ReAct agent backed by Bedrock Converse API
+- Task-specific system prompts (extract → JSON only, no prose)
+- **Real MCP tools** injected so AI can fetch live data (e.g. Scoro projects)
+- Token usage and **USD cost** calculated and stored per step
+- Failures are visible (no silent fallback to mock except missing credentials)
+
+### Cost transparency
+
+A typical "Test safely" run on Nova Micro costs **$0.0003–$0.001** — shown in the run drawer and Analytics.
+
+---
+
+## Product areas
+
+| Section | Route | What it does |
+|---|---|---|
+| Home | `/` | Dashboard: metrics, exceptions, recent runs |
+| Workflows | `/workflows` | List, create, open visual editor |
+| Templates | `/templates` | Pre-built workflow templates |
+| Runs | `/runs` | All executions: status, duration, cost |
+| Approvals | `/approvals` | Human-in-the-loop review queue |
+| Connections | `/connections` | MCP servers + business connectors |
+| Team | `/team` | Members, roles |
+| Analytics | `/analytics` | Completion rate, duration, AI spend |
+| Settings | `/settings` | Workspace configuration |
+
+The **Workflow Editor** (`app/workflows/[id]/WorkflowEditor.tsx`) is the centerpiece:
+
+- React Flow canvas with minimap, keyboard delete, step settings panel
+- Tabs: Canvas, Plain-language explanation, Permissions, Usage estimate, Run history
+- Live "Test safely" with polling until terminal state
+
+---
+
+## Authentication and multi-tenancy
+
+### Production (AWS Cognito)
+
+- Login at `/login`
+- JWT stored in `localStorage` as `wp-jwt`
+- Sent as `Authorization: Bearer <token>` on every API call
+- Custom claim: `custom:tenant_id` (e.g. `tenant-northstar`)
+
+### Local dev
+
+- `WORKPILOT_LOCAL_AUTH_ENABLED=true`
+- Header stub: `X-WorkPilot-Tenant-ID: tenant-northstar` — no token needed
+
+### Multi-tenant model
+
+```
+Tenant → Users → Workflows → Versions → Runs → StepRuns
+                              ↓
+                         AuditEvents (hash-chained)
+                         Connections (encrypted credentials)
+```
+
+---
+
+## Data model
+
+```
+tenants
+  └── users
+  └── workflows
+        └── workflow_versions  (immutable canonical_definition JSON)
+              └── workflow_runs  (idempotency_key unique per tenant)
+                    └── step_runs  (per-step I/O, model_usage, tool_usage)
+  └── audit_events  (immutable_hash chain)
+  └── connections  (encrypted third-party credentials)
+```
+
+The same concepts are mirrored in **Cloudflare D1** (`db/schema.ts`) for the hosted demo adapter. See [ADR 0001](docs/adr/0001-dual-data-adapters.md).
+
+---
+
+## What's real vs. simulated
+
+| Capability | Status |
+|---|---|
+| Visual workflow builder | Real |
+| Workflow CRUD + versioning | Real |
+| Run execution + history | Real |
+| Real Bedrock AI runs | Real (when configured) |
+| Cost tracking per run | Real |
+| Audit trail | Real (hash-chained) |
+| MCP tool calls (reads) | Real |
+| MCP / tool writes | Blocked by default (safety) |
+| Approval pause/resume | UI present; durable backend pause is roadmap |
+| OAuth connectors (Gmail, Slack, etc.) | UI + demo; full OAuth is roadmap |
+| NL → workflow generation | Deferred |
+
+See [`docs/production-readiness.md`](docs/production-readiness.md) for the roadmap to full production.
+
+---
+
+## Repository layout
+
+```
+workpilot/
+├── app/                    # Next.js UI pages and components
+├── lib/                    # API client, types, workflow mapping
+├── db/                     # D1 schema + runtime adapter
+├── worker/                 # Cloudflare Worker entry
+├── apps/api/               # FastAPI control plane
+│   ├── app/executor.py     # Native workflow executor
+│   ├── app/runtimes/       # Bedrock, LangGraph, deterministic
+│   ├── app/mcp/            # MCP client
+│   └── alembic/            # DB migrations
+├── apps/mcp-server/        # Demo MCP server
+├── infra/                  # Terraform (AWS)
+├── docs/adr/               # Architecture decision records
+└── docker-compose.yml      # Local full stack
+```
 
 ---
 
@@ -51,28 +349,15 @@ npm run dev
 
 All pages show realistic demo data. The "Test safely" button simulates a run locally. Useful for UI development.
 
----
+### Deployment modes summary
 
-## Authentication
-
-### Staging (AWS Cognito)
-
-Login URL: http://localhost:3001/login (or the UI wherever it's hosted)
-
-Use the credentials in your local `.env` file:
-
-| Field | Env var |
+| Mode | Use case |
 |---|---|
-| Email | `DEMO_COGNITO_EMAIL` |
-| Password | `DEMO_COGNITO_PASSWORD` |
-| Cognito pool | `WORKPILOT_COGNITO_USER_POOL_ID` |
-| Client ID | `NEXT_PUBLIC_COGNITO_CLIENT_ID` |
-
-The JWT is stored in `localStorage` as `wp-jwt` and sent as `Authorization: Bearer <token>` on every API call.
-
-### Local Docker (no Cognito)
-
-Set `WORKPILOT_LOCAL_AUTH_ENABLED=true` in docker-compose.yml (already the default). Any request with the header `X-WorkPilot-Tenant-ID: tenant-northstar` is accepted without a token.
+| **Docker Compose** | Full local stack: PG + Redis + API + Worker + Web |
+| **Dev server + AWS API** | Frontend hot-reload, backend on staging ECS |
+| **UI-only demo** | No backend — static demo data in browser |
+| **Cloudflare Workers** | Frontend on Cloudflare, API on AWS ALB |
+| **AWS ECS (staging)** | Production-shaped: ALB → Fargate, Cognito, Bedrock |
 
 ---
 
@@ -103,9 +388,35 @@ Open **Connections** → **MCP Servers** — add any Model Context Protocol serv
 
 ---
 
+## Suggested demo script
+
+A 5-minute walkthrough for presentations:
+
+1. **Login** — Cognito or local stub
+2. **Workflows** → open "Client brief processor"
+3. Show **visual canvas** — explain step types in business language ("AI reads the brief", "checks if deadline exists")
+4. Click **Test safely** — real Bedrock run
+5. Open **Run drawer** — step timeline, duration, exact AI cost
+6. **Runs** page — full history
+7. **Analytics** — aggregate metrics
+8. **Connections** → mention MCP (optional: show demo server)
+9. Close with **governance**: tenant isolation, audit log, safe mode
+
+---
+
 ## MCP server integration
 
 MCP (Model Context Protocol) lets you connect any tool server to your AI agents. WorkPilot's AI executor can call MCP tools as workflow steps.
+
+```
+Connections page → store MCP server URL + credentials
+                → API discovers tools via tools/list
+                → Tool steps / AI tasks invoke tools via tools/call
+```
+
+**Read vs write policy:** the MCP client classifies tools as read-only vs write; the executor enforces policy.
+
+Built-in **Scoro connector** exists in the API (`apps/api/app/connectors/scoro.py`) for business-system integration.
 
 ### Run the demo MCP server
 
@@ -243,7 +554,7 @@ and the UI talks to your FastAPI control plane on ECS.
 
 1. Register a domain (e.g. app.yourcompany.com) in Route 53
 2. Create an HTTPS listener on the ALB with an ACM certificate
-3. Point a CNAME to the ALB DNS or Amplify/Vercel URL
+3. Point a CNAME to the ALB DNS or Amplify URL
 
 ### Add team members (Cognito)
 
@@ -275,12 +586,14 @@ Each user needs `custom:tenant_id=tenant-northstar` to see the Northstar Project
 | `WORKPILOT_COGNITO_USER_POOL_ID` | — | Required for Cognito JWT validation |
 | `WORKPILOT_COGNITO_APP_CLIENT_ID` | — | Cognito app client ID |
 | `WORKPILOT_COGNITO_REGION` | `eu-central-1` | Cognito region |
-| `WORKPILOT_AGENT_RUNTIME` | `deterministic_mock` | `deterministic_mock` \| `bedrock_langgraph` |
+| `WORKPILOT_AGENT_RUNTIME` | `deterministic_mock` | `deterministic_mock` \| `bedrock_langgraph` \| `agentcore` |
 | `WORKPILOT_BEDROCK_MODEL_ID` | `eu.amazon.nova-micro-v1:0` | Bedrock model (cross-region profile) |
 | `WORKPILOT_BEDROCK_REGION` | `eu-central-1` | Bedrock region |
 | `WORKPILOT_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `WORKPILOT_OTEL_ENABLED` | `false` | Enable OpenTelemetry export |
 | `WORKPILOT_SEED_DEMO_DATA` | `false` | Seed Northstar demo workspace on startup |
+| `WORKPILOT_EXECUTE_RUNS_INLINE` | `false` | Run workflows in the API process (local dev) |
+| `WORKPILOT_ALLOW_TOOL_WRITES` | unset | Allow MCP/tool write operations (off by default) |
 
 ### Web (`.env.local` / docker-compose / Amplify)
 
@@ -290,6 +603,8 @@ Each user needs `custom:tenant_id=tenant-northstar` to see the Northstar Project
 | `NEXT_PUBLIC_COGNITO_CLIENT_ID` | Cognito app client ID |
 | `NEXT_PUBLIC_COGNITO_REGION` | Cognito region |
 | `NEXT_PUBLIC_DEMO_EMAIL` | Pre-fill email on login page |
+
+Copy `.env.example` to `.env` to get started: `cp .env.example .env`
 
 ---
 
@@ -302,6 +617,18 @@ Each user needs `custom:tenant_id=tenant-northstar` to see the Northstar Project
 | Claude Haiku 4.5 | `eu.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80/1M in · $4.00/1M out | Best quality. Requires Anthropic EU use-case form. |
 
 Change the model by updating `WORKPILOT_BEDROCK_MODEL_ID` in the ECS task definition or `.env`.
+
+---
+
+## Architecture decisions
+
+Key design decisions are documented as ADRs in `docs/adr/`:
+
+- [ADR 0001 — Dual local and hosted data adapters](docs/adr/0001-dual-data-adapters.md) — FastAPI/PostgreSQL locally + Cloudflare D1 for hosted demo
+- [ADR 0002 — Canonical workflow and native executor](docs/adr/0002-canonical-workflow-native-executor.md) — `workpilot.io/v1` schema as source of truth
+- [ADR 0003 — Local authentication stub](docs/adr/0003-local-authentication-stub.md) — header-based tenant stub for local dev
+
+Implementation rules for contributors are in [`AGENT.md`](AGENT.md).
 
 ---
 
