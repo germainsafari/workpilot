@@ -35,9 +35,11 @@ test("server-renders the WorkPilot dashboard", async () => {
   const response = await fetch(`${origin}/`);
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>WorkPilot — AI operations, under your control<\/title>/i);
-  assert.match(html, /Good morning, Alex/);
-  assert.match(html, /Waiting for approval/);
+  assert.match(html, /<title>Dashboard · WorkPilot<\/title>/i);
+  // Timezone-dependent copy is applied only after hydration. The deterministic
+  // fallback guarantees the browser's first render matches this HTML.
+  assert.match(html, /Welcome back/);
+  assert.doesNotMatch(html, /Good morning|Good afternoon|Good evening/);
   assert.match(html, /Recent runs/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/);
 });
@@ -46,9 +48,17 @@ test("server-renders the workflow library", async () => {
   const response = await fetch(`${origin}/workflows`);
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Client brief processor/);
-  assert.match(html, /Weekly project health report/);
+  assert.match(html, /Loading workflows/);
   assert.match(html, /Create workflow/);
+});
+
+test("server-renders login state without a client Suspense fallback", async () => {
+  const response = await fetch(`${origin}/login?reason=session`);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Your session expired\. Please sign in again\./);
+  assert.match(html, /<title>Sign in · WorkPilot<\/title>/i);
+  assert.doesNotMatch(html, /react-loading-skeleton/);
 });
 
 test("serves the hosted health endpoint", async () => {

@@ -160,6 +160,12 @@ resource "aws_ecs_task_definition" "api" {
         {
           name      = "WORKPILOT_JWT_SECRET"
           valueFrom = aws_secretsmanager_secret.jwt_secret.arn
+        },
+        {
+          # Without this, app.crypto falls back to deriving a key from the JWT
+          # secret — which couples credential storage to token signing.
+          name      = "WORKPILOT_ENCRYPTION_KEY"
+          valueFrom = aws_secretsmanager_secret.encryption_key.arn
         }
       ]
 
@@ -253,9 +259,14 @@ resource "aws_ecs_service" "api" {
   health_check_grace_period_seconds  = 60
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # Public subnets + a public IP by default: the task reaches ECR, Secrets
+    # Manager, CloudWatch and Bedrock over the internet gateway, which removes
+    # the need for a NAT gateway and five Interface VPC endpoints (~$153/mo).
+    # The task is still unreachable from the internet — aws_security_group
+    # .ecs_tasks only admits the container port from the ALB's security group.
+    subnets          = var.enable_private_egress ? aws_subnet.private[*].id : aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false
+    assign_public_ip = !var.enable_private_egress
   }
 
   load_balancer {

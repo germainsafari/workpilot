@@ -698,7 +698,23 @@ export function connectorModalDefaults(connector: BusinessConnector): {
   };
 }
 
-export function isConnectorConnected(name: string, saved: Array<{ name: string }>): boolean {
+/**
+ * Has this catalog connector been connected?
+ *
+ * Matches on `connectorId` first — that is what the API stores — and only falls
+ * back to fuzzy name matching for rows created before connectorId existed. Name
+ * matching alone was too loose: a connection called "Drive" marked every
+ * connector whose name contained "drive" as connected.
+ */
+export function isConnectorConnected(
+  name: string,
+  saved: Array<{ name: string; connectorId?: string; status?: string }>,
+): boolean {
   const key = name.toLowerCase();
-  return saved.some((c) => c.name.toLowerCase().includes(key) || key.includes(c.name.toLowerCase()));
+  return saved.some((c) => {
+    if (c.status && c.status !== "connected") return false;
+    if (c.connectorId && c.connectorId.toLowerCase() === key) return true;
+    const cname = c.name.toLowerCase();
+    return cname === key || cname.includes(key) || key.includes(cname);
+  });
 }

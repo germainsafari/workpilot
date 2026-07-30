@@ -62,10 +62,17 @@ resource "aws_internet_gateway" "main" {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# NAT Gateway — single AZ for cost in non-prod
+# NAT Gateway — only when var.enable_private_egress is true.
+#
+# A NAT gateway is ~$33/mo plus $0.045/GB processed. It only earns that when
+# compute must sit in private subnets. With tasks in public subnets behind a
+# restrictive security group there is nothing for it to do, so it defaults off.
+# See variables.tf for the full rationale.
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_eip" "nat" {
+  count = var.enable_private_egress ? 1 : 0
+
   domain = "vpc"
 
   tags = {
@@ -76,7 +83,9 @@ resource "aws_eip" "nat" {
 }
 
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
+  count = var.enable_private_egress ? 1 : 0
+
+  allocation_id = aws_eip.nat[0].id
   subnet_id     = aws_subnet.public[0].id
 
   tags = {
@@ -106,9 +115,15 @@ resource "aws_route_table" "public" {
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
+  # Without a NAT gateway the private subnets simply have no default route.
+  # They stay defined so flipping enable_private_egress back on is a one-liner.
+  dynamic "route" {
+    for_each = var.enable_private_egress ? [1] : []
+
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = aws_nat_gateway.main[0].id
+    }
   }
 
   tags = {
@@ -135,6 +150,8 @@ resource "aws_route_table_association" "private" {
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_security_group" "vpc_endpoints" {
+  count = var.enable_private_egress ? 1 : 0
+
   name        = "${local.project}-${local.env}-sg-vpc-endpoints"
   description = "Allow HTTPS from within the VPC to Interface VPC endpoints"
   vpc_id      = aws_vpc.main.id
@@ -162,6 +179,12 @@ resource "aws_security_group" "vpc_endpoints" {
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VPC Endpoints
+#
+# The S3 Gateway endpoint is free and always created. The five Interface
+# endpoints below are billed per ENI per AZ (~$0.011/hr each), so across three
+# AZs they cost ~$24/mo *each* — ~$120/mo in total. They are only needed when
+# tasks have no route to the public internet, so they follow the same
+# enable_private_egress toggle as the NAT gateway.
 # ──────────────────────────────────────────────────────────────────────────────
 
 # S3 — Gateway type (no security group required)
@@ -182,11 +205,13 @@ resource "aws_vpc_endpoint" "s3" {
 
 # ECR API — Interface type
 resource "aws_vpc_endpoint" "ecr_api" {
+  count = var.enable_private_egress ? 1 : 0
+
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${local.region}.ecr.api"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
   tags = {
@@ -196,11 +221,13 @@ resource "aws_vpc_endpoint" "ecr_api" {
 
 # ECR DKR — Interface type
 resource "aws_vpc_endpoint" "ecr_dkr" {
+  count = var.enable_private_egress ? 1 : 0
+
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${local.region}.ecr.dkr"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
   tags = {
@@ -210,11 +237,13 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
 
 # Secrets Manager — Interface type
 resource "aws_vpc_endpoint" "secretsmanager" {
+  count = var.enable_private_egress ? 1 : 0
+
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${local.region}.secretsmanager"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
   tags = {
@@ -224,11 +253,13 @@ resource "aws_vpc_endpoint" "secretsmanager" {
 
 # CloudWatch Logs — Interface type
 resource "aws_vpc_endpoint" "logs" {
+  count = var.enable_private_egress ? 1 : 0
+
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${local.region}.logs"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
   tags = {
@@ -238,11 +269,13 @@ resource "aws_vpc_endpoint" "logs" {
 
 # X-Ray — Interface type
 resource "aws_vpc_endpoint" "xray" {
+  count = var.enable_private_egress ? 1 : 0
+
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${local.region}.xray"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
   tags = {

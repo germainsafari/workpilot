@@ -24,6 +24,10 @@ from fastapi.testclient import TestClient
 # Ensure local auth is on before importing app modules.
 os.environ.setdefault("WORKPILOT_LOCAL_AUTH_ENABLED", "true")
 os.environ.setdefault("WORKPILOT_DATABASE_URL", "sqlite+aiosqlite:///./test-workpilot.db")
+# The HS256 path needs a signing secret. Set it here rather than relying on a
+# .env file: pydantic-settings resolves env_file relative to the working
+# directory, so the repo-root .env is invisible when pytest runs from apps/api.
+os.environ.setdefault("WORKPILOT_JWT_SECRET", "test-only-hs256-signing-secret-32-bytes-min")
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +142,19 @@ def _make_rs256_token(
 
 class TestHS256Auth:
     """Tests for the local-dev HS256 JWT path."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_settings(self) -> Generator[None, None, None]:
+        """Drop the settings cache so the env var above is picked up.
+
+        Another test module may have already populated the lru_cache during
+        collection, before this module's os.environ defaults were applied.
+        """
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
 
     def test_valid_hs256_token_returns_principal(self, auth_app: FastAPI) -> None:
         from app.config import get_settings

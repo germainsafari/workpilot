@@ -44,3 +44,27 @@ variable "agentcore_runtime_arn" {
   type        = string
   default     = ""
 }
+
+variable "enable_private_egress" {
+  description = <<-EOT
+    Run Fargate tasks in private subnets, reaching AWS through a NAT gateway and
+    five Interface VPC endpoints (ECR api/dkr, Secrets Manager, Logs, X-Ray).
+
+    This costs roughly $153/month before any data transfer: ~$33 for the NAT
+    gateway plus ~$24 per interface endpoint (each is billed per ENI per AZ, and
+    there are three AZs). For a single 0.5-vCPU staging task that is around 80%
+    of the total bill and it is redundant — the NAT and the endpoints are two
+    ways to solve the same egress problem.
+
+    When false (the default), tasks run in public subnets with a public IP and
+    reach AWS over the internet gateway. This is not a security downgrade here:
+    the task security group only admits port 8000 from the ALB's security group,
+    so nothing is reachable from the internet. The free S3 gateway endpoint is
+    kept either way.
+
+    Set to true for production if egress must stay off the public internet — for
+    example to satisfy a "no public IP on compute" control.
+  EOT
+  type        = bool
+  default     = false
+}

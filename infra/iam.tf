@@ -37,6 +37,7 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
       aws_secretsmanager_secret.database_url.arn,
       aws_secretsmanager_secret.jwt_secret.arn,
       aws_secretsmanager_secret.bedrock_region.arn,
+      aws_secretsmanager_secret.encryption_key.arn,
     ]
   }
 }

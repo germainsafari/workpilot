@@ -44,6 +44,7 @@ export interface WorkflowSummary {
   timeSavedHours: number;
   lastRun: string;
   definition: WorkflowDefinition;
+  explanationDetail?: import("./api").ApiWorkflowExplanation;
 }
 
 export interface RunRecord {

@@ -1,8 +1,18 @@
-// TypeScript twin of the Python NativeExecutor (apps/api/app/executor.py).
-// It runs inside the Cloudflare Worker so the D1-backed demo API
-// (app/v1/workflows/[id]/runs) can execute a workflow with zero external
-// dependencies. Like the Python version it is deterministic and never performs
-// live external writes (tool steps default to dry-run).
+// Offline demo executor for the D1-backed Worker API
+// (app/v1/workflows/[id]/runs). It has NO tool execution and NO model: it exists
+// only so the UI can be demonstrated with zero external dependencies.
+//
+// IMPORTANT — this is not the real executor. Tool calls against connected
+// systems, encrypted credentials, MCP, and the read-only write policy all live
+// in the FastAPI service (apps/api/app/executor.py + tool_invoker.py). To run
+// actual workflows, point the UI at that service with
+// NEXT_PUBLIC_CONTROL_PLANE_URL; when that variable is unset the UI falls back
+// to these same-origin routes and nothing real can execute.
+//
+// Every output below is explicitly labelled `simulated: true` so a caller cannot
+// mistake it for a real result. A previous version reported
+// `mode: "live", recordsChanged: 1` for a tool step while performing no work at
+// all, which made this path actively misleading.
 
 export type ExecutableStep = {
   id: string;
@@ -48,16 +58,30 @@ export async function executeNativeWorkflow(steps: ExecutableStep[], initialInpu
     let status: StepExecution["status"] = "completed";
 
     if (step.type === "ai_task") {
-      output = mockOrganizeBrief(context);
-      modelUsage = { provider: "deterministic_mock", inputUnits: 0, outputUnits: 0, costUsd: 0 };
+      output = {
+        ...mockOrganizeBrief(context),
+        simulated: true,
+        warning: "Demo output. No model was called — this deployment has no AI backend configured.",
+      };
+      modelUsage = { provider: "deterministic_mock", inputUnits: 0, outputUnits: 0, costUsd: 0, degraded: true };
     } else if (step.type === "condition") {
       const actual = step.condition?.field === "missing_details" ? ((context.missingDetails as unknown[] | undefined)?.length ?? 0) > 0 : context[step.condition?.field ?? ""];
       output = { matched: actual === step.condition?.equals, actual, expected: step.condition?.equals };
     } else if (step.type === "wait") {
       output = { waitedSeconds: Math.max(0, Math.min(step.durationSeconds ?? 0, 1)), simulated: true };
     } else if (step.type === "tool") {
-      output = { prepared: true, operation: step.operation ?? "safe_operation", mode: step.dryRun === false ? "live" : "dry_run", recordsChanged: step.dryRun === false ? 1 : 0 };
-      toolUsage = { operation: step.operation ?? "safe_operation", dryRun: step.dryRun !== false, idempotent: true };
+      // No tool was called. Say so — do not claim a live write or a changed
+      // record, because nothing here can reach an external system.
+      output = {
+        status: "not_executed",
+        operation: step.operation ?? "unknown",
+        simulated: true,
+        recordsChanged: 0,
+        message:
+          "This deployment cannot call external tools. Connect the FastAPI control plane " +
+          "(NEXT_PUBLIC_CONTROL_PLANE_URL) to run this step against a real system.",
+      };
+      toolUsage = { invoked: false, reason: "d1_demo_executor_has_no_tool_support" };
     } else if (step.type === "end") {
       output = { outcome: "completed" };
     } else {

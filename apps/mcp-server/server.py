@@ -87,11 +87,15 @@ async def main() -> None:
         expose_headers=["mcp-session-id"],
     )
 
-    print("WorkPilot Demo MCP Server starting …")
+    # ASCII only: the default Windows console codepage (cp1250) cannot encode
+    # characters like U+2192, and print() raising here kills the server before
+    # uvicorn ever binds.
+    print("WorkPilot Demo MCP Server starting ...")
     print("  Endpoint : http://localhost:9000/mcp")
     print("  Tools    : get_weather, summarise_text, list_tasks")
-    print("  Connect  : WorkPilot → Connections → MCP Servers")
+    print("  Connect  : WorkPilot -> Connections -> MCP Servers")
     print("  URL field: http://localhost:9000/mcp")
+    print("  From Docker, use: http://host.docker.internal:9000/mcp")
 
     config = uvicorn.Config(app_with_cors, host="0.0.0.0", port=9000, log_level="warning")
     server = uvicorn.Server(config)

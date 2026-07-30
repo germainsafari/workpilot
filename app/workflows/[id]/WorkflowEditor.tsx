@@ -16,17 +16,21 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import {
+  // Aliased: this file already defines a local `Activity` component for the
+  // Runs & activity tab.
+  Activity as ActivityIcon,
   AlertTriangle,
   ArrowLeft,
   Bot,
+  Cable,
   Check,
   CheckCircle2,
   ChevronDown,
-  CircleDollarSign,
   CircleStop,
   Clock3,
   CloudUpload,
   CornerDownRight,
+  Database,
   Gauge,
   GitBranch,
   Hand,
@@ -50,9 +54,19 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, formatDuration, formatRelativeTime, parseApiDate, type ApiRun } from "../../../lib/api";
+import {
+  api,
+  formatDuration,
+  formatRelativeTime,
+  parseApiDate,
+  type ApiRun,
+  type ApiStepRun,
+} from "../../../lib/api";
 import type { StepType, WorkflowSummary } from "../../../lib/types";
 import { StatusPill } from "../../components/StatusPill";
+
+/** A run in one of these states will not change again, so polling can stop. */
+const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled", "stopped"]);
 
 type FlowData = { label: string; summary: string; stepType: StepType };
 type FlowNode = Node<FlowData>;
@@ -82,8 +96,11 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
     animated: edge.source === "approval",
     type: "smoothstep",
     className: "flow-edge",
-    labelStyle: { fill: "#5f655f", fontSize: 11, fontWeight: 650 },
-    labelBgStyle: { fill: "#f6f7f3", fillOpacity: 1 },
+    // Tokens rather than literals: React Flow passes these straight to SVG
+    // fill, so a CSS variable resolves and follows the active theme. Hardcoded
+    // greys rendered white edge labels on the dark canvas.
+    labelStyle: { fill: "var(--muted)", fontSize: 11, fontWeight: 650 },
+    labelBgStyle: { fill: "var(--canvas)", fillOpacity: 1 },
   })), [workflow.definition.edges]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>(initialNodes);
@@ -101,6 +118,32 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
   const [runError, setRunError] = useState<string | null>(null);
   const [showTestDrawer, setShowTestDrawer] = useState(false);
   const [activityRefresh, setActivityRefresh] = useState(0);
+  // The most recent finished run, used to show each step what it actually did.
+  const [latestRun, setLatestRun] = useState<ApiRun | null>(null);
+
+  // Load the last run on open so selecting a node shows real data immediately,
+  // without having to press Test first.
+  useEffect(() => {
+    let cancelled = false;
+    api.runs
+      .list()
+      .then((all) => {
+        if (cancelled) return;
+        const mine = all
+          .filter((r) => r.workflow_id === workflow.id && r.steps.length > 0)
+          .sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
+        if (mine[0]) setLatestRun(mine[0]);
+      })
+      .catch(() => {
+        /* no history yet — the panel shows its "not run" state */
+      });
+    return () => { cancelled = true; };
+  }, [workflow.id]);
+
+  // Prefer the run in flight; fall back to history.
+  const runForSteps = activeRun && activeRun.steps.length > 0 ? activeRun : latestRun;
+  const stepRunFor = (stepId: string) =>
+    runForSteps?.steps.find((s) => s.step_id === stepId) ?? null;
 
   const onConnect = useCallback((connection: Connection) => {
     setEdges((cur) => addEdge({ ...connection, type: "smoothstep" }, cur));
@@ -116,18 +159,48 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
     setAddOpen(false);
   };
 
-  const startTest = async () => {
+  /**
+   * Trigger a run and follow it to completion.
+   *
+   * Runs are queued and executed by a separate worker, so the object returned by
+   * `trigger` has status "queued" and zero steps. The previous version stored
+   * that and stopped, which is why the drawer and the step panel stayed empty
+   * however long you waited — the UI never asked again.
+   */
+  const startTest = useCallback(async () => {
     setRunError(null);
     setActiveRun(null);
     setShowTestDrawer(true);
+
+    let run: ApiRun;
     try {
-      const run = await api.runs.trigger(workflow.id, { source: "workpilot_ui_test" });
-      setActiveRun(run);
-      setActivityRefresh((value) => value + 1);
+      run = await api.runs.trigger(workflow.id, { source: "workpilot_ui_test" });
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Run failed");
+      setRunError(err instanceof Error ? err.message : "Could not start the run.");
+      return;
     }
-  };
+    setActiveRun(run);
+
+    // Poll until the worker finishes. ~90s ceiling: a multi-step workflow that
+    // calls a slow third-party API can legitimately take a while.
+    for (let attempt = 0; attempt < 60 && !TERMINAL_RUN_STATES.has(run.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, attempt < 10 ? 700 : 2000));
+      try {
+        run = await api.runs.get(run.id);
+        setActiveRun(run);
+      } catch {
+        // A transient fetch failure shouldn't abandon a run that is still going.
+      }
+    }
+
+    if (!TERMINAL_RUN_STATES.has(run.status)) {
+      setRunError(
+        `The run is still ${run.status} after 90s. It may still finish — check Runs & activity.`,
+      );
+    }
+    setLatestRun(run);
+    setActivityRefresh((value) => value + 1);
+  }, [workflow.id]);
 
   const handlePublish = async () => {
     setPublishing(true);
@@ -186,7 +259,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
             deleteKeyCode={["Backspace", "Delete"]}
             aria-label="Visual workflow builder"
           >
-            <Background gap={24} size={1.2} color="#d9ddd6" />
+            <Background gap={24} size={1.2} color="var(--line)" />
             <Controls position="bottom-left" showInteractive={false} />
             <MiniMap position="bottom-right" pannable zoomable nodeColor={(node) => node.data?.stepType === "approval" ? "#f3a955" : node.data?.stepType === "ai_task" ? "#a687f5" : "#9ed6b4"} />
             <Panel position="top-left" className="canvas-toolbar">
@@ -203,7 +276,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
           <div className="canvas-legend"><span><b className="legend-dot reasoning" />AI-assisted</span><span><b className="legend-dot deterministic" />Fixed rule</span><span><b className="legend-dot approval" />Human approval</span></div>
         </div>
         <aside className="configuration-panel">
-          {selected ? <StepConfiguration node={selected} onClose={() => setSelected(null)} onChange={(label) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, label } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, label } } : null); setSaved(false); }} /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and safeguards.</p></div>}
+          {selected ? <StepConfiguration node={selected} stepRun={stepRunFor(selected.id)} runStatus={runForSteps?.status ?? null} onClose={() => setSelected(null)} onChange={(label) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, label } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, label } } : null); setSaved(false); }} /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and what it did on the last run.</p></div>}
         </aside>
       </div>}
 
@@ -223,22 +296,197 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
   );
 }
 
-function StepConfiguration({ node, onClose, onChange }: { node: FlowNode; onClose: () => void; onChange: (label: string) => void }) {
+/** Render a value as readable JSON, truncated so a huge payload cannot wedge the panel. */
+function formatData(value: unknown, limit = 4000): string {
+  if (value === null || value === undefined) return "";
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  } catch {
+    text = String(value);
+  }
+  return text.length > limit ? `${text.slice(0, limit)}\n… truncated` : text;
+}
+
+const DATA_BLOCK: React.CSSProperties = {
+  margin: 0,
+  padding: "9px 10px",
+  borderRadius: 8,
+  background: "var(--canvas)",
+  border: "1px solid var(--line)",
+  color: "var(--ink)",
+  fontFamily: "var(--font-geist-mono, monospace)",
+  fontSize: 10,
+  lineHeight: 1.5,
+  maxHeight: 260,
+  overflow: "auto",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+};
+
+/**
+ * What this step produced on the most recent run.
+ *
+ * This is the part the panel was missing entirely: it described a step's
+ * *intent* in static copy but never showed the tool it called, the arguments it
+ * sent, the records it got back, or what the model cost.
+ */
+function StepActivity({ stepRun, runStatus }: { stepRun: ApiStepRun | null; runStatus: string | null }) {
+  if (!stepRun) {
+    return (
+      <div className="config-section">
+        <h3><ActivityIcon size={16} />Last run</h3>
+        <p>
+          {runStatus
+            ? "This step did not run in the most recent execution — an earlier branch or failure stopped before it."
+            : "This workflow has not run yet. Press Test safely to execute it and see the data each step produces."}
+        </p>
+      </div>
+    );
+  }
+
+  const tool = stepRun.tool_usage ?? {};
+  const model = stepRun.model_usage ?? {};
+  const invoked = tool.invoked === true;
+  const failed = stepRun.status !== "completed";
+
+  return (
+    <>
+      <div className="config-section">
+        <h3><ActivityIcon size={16} />What it did on the last run</h3>
+        <p style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <StatusPill status={failed ? "Failed" : "Completed"} />
+          {typeof tool.duration_ms === "number" && <span>{tool.duration_ms} ms</span>}
+          {typeof model.cost_usd === "number" && model.cost_usd > 0 && (
+            <span>${Number(model.cost_usd).toFixed(6)}</span>
+          )}
+        </p>
+        {stepRun.error && (
+          <p style={{ color: "var(--danger)", marginTop: 6 }}>{stepRun.error}</p>
+        )}
+      </div>
+
+      {invoked && (
+        <div className="config-section">
+          <h3><Cable size={16} />Tool call</h3>
+          <p>
+            Called <strong>{String(tool.tool_name)}</strong> on{" "}
+            <strong>{String(tool.connection_name)}</strong>
+            {tool.mode ? ` (${String(tool.mode)}-only)` : ""}.
+          </p>
+          {Boolean(tool.arguments) && Object.keys((tool.arguments ?? {}) as object).length > 0 && (
+            <>
+              <span className="form-field" style={{ display: "block", marginTop: 8 }}>Arguments sent</span>
+              <pre style={DATA_BLOCK}>{formatData(tool.arguments, 900)}</pre>
+            </>
+          )}
+        </div>
+      )}
+
+      {tool.invoked === false && tool.reason && (
+        <div className="config-section">
+          <h3><Cable size={16} />Tool call</h3>
+          <p>No tool was called ({String(tool.reason).replace(/_/g, " ")}). Pick a connection and a tool for this step.</p>
+        </div>
+      )}
+
+      {Object.keys(model).length > 0 && (
+        <div className="config-section">
+          <h3><Bot size={16} />Model</h3>
+          <p>
+            {String(model.provider ?? "unknown")}
+            {model.model_id ? ` · ${String(model.model_id)}` : ""}
+            {typeof model.input_tokens === "number"
+              ? ` · ${model.input_tokens} in / ${model.output_tokens ?? 0} out tokens`
+              : ""}
+          </p>
+          {Array.isArray(model.tools_called) && model.tools_called.length > 0 && (
+            <p style={{ marginTop: 4 }}>
+              Chose to call: <strong>{(model.tools_called as string[]).join(", ")}</strong>
+            </p>
+          )}
+          {model.degraded === true && (
+            <p style={{ color: "var(--danger)", marginTop: 4 }}>
+              Ran without a real model — credentials are not configured.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="config-section">
+        <h3><Database size={16} />Data it produced</h3>
+        <pre style={DATA_BLOCK}>{formatData(stepRun.output_data) || "(no output)"}</pre>
+      </div>
+
+      <details className="config-section" style={{ cursor: "pointer" }}>
+        <summary style={{ fontSize: 11, fontWeight: 650, color: "var(--muted)" }}>
+          Data it received
+        </summary>
+        <pre style={{ ...DATA_BLOCK, marginTop: 8 }}>
+          {formatData(stepRun.input_data) || "(no input)"}
+        </pre>
+      </details>
+    </>
+  );
+}
+
+function StepConfiguration({ node, stepRun, runStatus, onClose, onChange }: {
+  node: FlowNode;
+  stepRun: ApiStepRun | null;
+  runStatus: string | null;
+  onClose: () => void;
+  onChange: (label: string) => void;
+}) {
   return <>
     <div className="config-head"><div className={`config-icon config-${node.data.stepType}`}>{stepIcon(node.data.stepType, 18)}</div><div><small>{labelForStep(node.data.stepType)}</small><h2>{node.data.label}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close step settings"><X size={17} /></button></div>
     <div className="config-body">
       <label className="form-field"><span>Step name</span><input value={node.data.label} onChange={(e) => onChange(e.target.value)} /></label>
       <div className="form-field"><span>What happens here</span><p className="read-only-field">{node.data.summary}</p></div>
-      {node.data.stepType === "ai_task" && <div className="config-section"><h3><Bot size={16} />How WorkPilot helps</h3><p>It organizes the brief into a fixed structure and returns a concise summary. It cannot send messages or change external records.</p><span className="safety-chip"><ShieldCheck size={14} />Structured result required</span></div>}
+
+      <StepActivity stepRun={stepRun} runStatus={runStatus} />
+
+      {node.data.stepType === "ai_task" && <div className="config-section"><h3><Bot size={16} />How WorkPilot helps</h3><p>A model reads this step&apos;s input and returns a structured result. It may call read-only tools on your connected systems, and cannot modify any external record.</p><span className="safety-chip"><ShieldCheck size={14} />Structured result required</span></div>}
       {node.data.stepType === "approval" && <><label className="form-field"><span>Who reviews it?</span><button className="select-field">Account manager <ChevronDown size={15} /></button></label><div className="config-section approval-rule"><h3><LockKeyhole size={16} />Approval rule</h3><p>The workflow pauses here. Later actions cannot run until the assigned reviewer approves.</p></div></>}
-      <div className="config-section"><h3><AlertTriangle size={16} />If this step fails</h3><p>Retry once, then pause the run and notify the workflow owner.</p></div>
+      <div className="config-section"><h3><AlertTriangle size={16} />If this step fails</h3><p>The run stops and records the error. Nothing further executes.</p></div>
     </div>
     <div className="config-footer"><button className="danger-link">Remove step</button><button className="primary-button" onClick={onClose}>Done</button></div>
   </>;
 }
 
 function Explanation({ workflow }: { workflow: WorkflowSummary }) {
-  return <div className="explanation-page"><div className="explanation-main"><div className="explanation-hero"><span><MessageSquareText size={22} /></span><div><p className="eyebrow">In plain language</p><h2>What this workflow does</h2><p>{workflow.description} Every action stays in safe test mode until a person approves publication.</p></div></div><div className="explanation-sections"><section><span>1</span><div><h3>What starts it</h3><p>A new client brief arrives through the connected form. WorkPilot records who submitted it and when.</p></div></section><section><span>2</span><div><h3>What it reads and prepares</h3><p>It reads only the submitted brief, then organizes deliverables, markets, dates, languages, and constraints.</p></div></section><section><span>3</span><div><h3>Where a person stays in control</h3><p>The account manager must review the standardized brief before any project tasks can be prepared.</p></div></section><section><span>4</span><div><h3>When something goes wrong</h3><p>The run retries once. If the issue remains, it pauses and tells the workflow owner without repeating completed actions.</p></div></section></div></div><aside className="explanation-aside"><h3>Safeguards</h3><div><ShieldCheck size={17} /><span><strong>No live writes in tests</strong><small>Connected tools are never changed during a safe test.</small></span></div><div><Hand size={17} /><span><strong>Human approval required</strong><small>Project tasks wait for an account manager.</small></span></div><div><LockKeyhole size={17} /><span><strong>Limited data access</strong><small>Only client brief fields are available to this workflow.</small></span></div><hr /><h3>Estimated usage</h3><p className="estimate"><strong>$1.60–$2.10</strong><small>per 100 completed briefs</small></p><p className="estimate"><strong>24 minutes</strong><small>estimated manual time saved per brief</small></p></aside></div>;
+  const detail = workflow.explanationDetail;
+  if (!detail) {
+    return <div className="explanation-page"><div className="explanation-main"><div className="explanation-hero"><span><MessageSquareText size={22} /></span><div><p className="eyebrow">In plain language</p><h2>What this workflow does</h2><p>{workflow.description}</p></div></div></div></div>;
+  }
+  return (
+    <div className="explanation-page">
+      <div className="explanation-main">
+        <div className="explanation-hero">
+          <span><MessageSquareText size={22} /></span>
+          <div><p className="eyebrow">In plain language</p><h2>What this workflow does</h2><p>{detail.summary}</p></div>
+        </div>
+        <div className="explanation-sections">
+          <section><span>1</span><div><h3>What starts it</h3><p>{detail.trigger}</p></div></section>
+          {detail.steps.map((step, index) => (
+            <section key={step.step_id}>
+              <span>{index + 2}</span>
+              <div><h3>{step.name}</h3><p>{step.detail}</p>{step.binding && <small className="safety-chip"><Cable size={13} />{step.binding}</small>}</div>
+            </section>
+          ))}
+          <section><span>{detail.steps.length + 2}</span><div><h3>When something goes wrong</h3><p>{detail.on_failure}</p></div></section>
+        </div>
+      </div>
+      <aside className="explanation-aside">
+        <h3>Safeguards</h3>
+        {detail.safeguards.map((safeguard) => <div key={safeguard}><ShieldCheck size={17} /><span><strong>{safeguard}</strong></span></div>)}
+        <div><Hand size={17} /><span><strong>Human control</strong><small>{detail.approval}</small></span></div>
+        <hr />
+        <h3>Observed usage</h3>
+        <p className="estimate"><strong>{detail.cost.headline}</strong><small>{detail.cost.caption}</small></p>
+        {detail.cost.average_tokens !== null && <p className="estimate"><strong>{detail.cost.average_tokens.toLocaleString()}</strong><small>average tokens per completed run</small></p>}
+      </aside>
+    </div>
+  );
 }
 
 function Activity({ workflowId, refreshKey }: { workflowId: string; refreshKey: number }) {
@@ -279,7 +527,7 @@ function Activity({ workflowId, refreshKey }: { workflowId: string; refreshKey: 
       {loading ? (
         <div className="empty-state"><LoaderCircle size={24} className="spin" /><p>Loading runs…</p></div>
       ) : runs.length === 0 ? (
-        <div className="empty-state"><History size={24} /><h3>No runs yet</h3><p>Click "Test safely" to trigger your first run.</p></div>
+        <div className="empty-state"><History size={24} /><h3>No runs yet</h3><p>Click &quot;Test safely&quot; to trigger your first run.</p></div>
       ) : (
         <div className="table-wrap">
           <table className="data-table">

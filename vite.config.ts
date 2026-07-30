@@ -1,5 +1,6 @@
 import vinext from "vinext";
 import { defineConfig } from "vite";
+import { resolve } from "node:path";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
 
@@ -41,20 +42,43 @@ export default defineConfig(async () => {
   process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
 
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import("@cloudflare/vite-plugin");
+  const dockerProduction = process.env.WORKPILOT_DOCKER_BUILD === "true";
+  // The local Docker image talks to FastAPI and runs under Node. Loading the
+  // Cloudflare plugin there would leave `cloudflare:` imports in the production
+  // bundle, which Node cannot execute.
+  const cloudflarePlugins = dockerProduction
+    ? []
+    : [
+        (
+          await import("@cloudflare/vite-plugin")
+        ).cloudflare({
+          viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+          config: localBindingConfig,
+        }),
+      ];
 
   return {
+    // RSC, SSR, and the browser optimizer must all share one React singleton.
+    // Without this, a dev-server dependency refresh can leave a client chunk
+    // calling hooks against a different dispatcher (`useState` on null).
+    resolve: {
+      dedupe: ["react", "react-dom", "react-server-dom-webpack"],
+      alias: dockerProduction
+        ? {
+            "cloudflare:workers": resolve(
+              process.cwd(),
+              "db/cloudflare-workers-node.ts",
+            ),
+          }
+        : undefined,
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
       vinext(),
       sites(),
-      cloudflare({
-        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-        config: localBindingConfig,
-      }),
+      ...cloudflarePlugins,
     ],
   };
 });

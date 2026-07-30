@@ -6,13 +6,20 @@ the safety boundary of the product:
 
 * ``ai_task`` steps are delegated to an :class:`AgentRuntime` (deterministic mock
   by default, Bedrock/LangGraph when configured) — never to free-form code.
-* ``tool`` steps are allowlisted and **dry-run only**; a live write
-  (``dry_run=False``) raises :class:`ExecutionPolicyError`.
+* ``tool`` steps are delegated to a :class:`~app.tool_invoker.ToolInvoker`, which
+  calls the tenant's connected system for real. Reads run; writes are refused
+  unless ``WORKPILOT_ALLOW_TOOL_WRITES`` is set. A step with no connection bound
+  reports ``not_configured`` rather than a fabricated success.
 * ``condition``/``wait``/``end`` steps run as ordinary, repeatable code.
 * Cycles are detected and rejected so a run can never loop forever.
 
 Branching after a condition picks the outgoing edge whose label matches the
 truthiness of the condition result (``ready``/``yes`` vs ``missing``/``no`` …).
+
+Step output is threaded two ways. ``context["_steps"][step_id]`` holds each
+step's output under its own name, which is what ``{{fetchProjects.result}}``
+argument templates resolve against; the same keys are also merged flat for
+backwards compatibility with condition steps that reference a bare field name.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from app.schemas import AITaskStep, CanonicalWorkflow, ConditionStep, EndStep, T
 
 if TYPE_CHECKING:
     from app.runtimes.base import AgentRuntime
+    from app.tool_invoker import ToolInvoker
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -77,12 +85,18 @@ class NativeExecutor:
         self,
         model: DeterministicMockModel | None = None,
         runtime: AgentRuntime | None = None,
+        tool_invoker: ToolInvoker | None = None,
     ) -> None:
         self._runtime = runtime
         # Keep self.model as a public attribute for backwards compatibility.
         # When a runtime is provided it takes precedence; self.model is still
         # available as a fallback / direct-use path.
         self.model = model or DeterministicMockModel()
+        if tool_invoker is None:
+            from app.tool_invoker import UnboundToolInvoker
+
+            tool_invoker = UnboundToolInvoker()
+        self._tool_invoker = tool_invoker
 
     async def execute(self, workflow: CanonicalWorkflow, initial_input: dict[str, Any]) -> list[StepResult]:
         step_map = {step.id: step for step in workflow.steps}
@@ -91,7 +105,8 @@ class NativeExecutor:
             outgoing[edge.from_step].append(edge)
 
         current_id: str | None = workflow.steps[0].id
-        context = dict(initial_input)
+        context: dict[str, Any] = dict(initial_input)
+        context["_steps"] = {}
         results: list[StepResult] = []
         visited: set[str] = set()
 
@@ -100,7 +115,9 @@ class NativeExecutor:
                 raise ExecutionPolicyError(f"cycle detected at step {current_id}")
             visited.add(current_id)
             step = step_map[current_id]
-            step_input = dict(context)
+            # Copy the _steps namespace too, so the persisted input_data is a
+            # snapshot of what this step actually saw rather than a live view.
+            step_input = {**context, "_steps": dict(context["_steps"])}
             output: dict[str, Any] = {}
             model_usage: dict[str, Any] = {}
             tool_usage: dict[str, Any] = {}
@@ -111,25 +128,30 @@ class NativeExecutor:
                 else:
                     output, model_usage = await self.model.execute(step, step_input)
             elif isinstance(step, ToolStep):
-                if not step.dry_run:
-                    raise ExecutionPolicyError(
-                        "live external writes require an approval engine and are disabled in Phase 1"
-                    )
-                output = {
-                    "prepared": True,
-                    "operation": step.operation,
-                    "mode": "dry_run",
-                    "records_changed": 0,
-                }
-                tool_usage = {"operation": step.operation, "dry_run": True, "idempotent": True}
+                output, tool_usage = await self._tool_invoker.invoke(step, step_input)
             elif isinstance(step, ConditionStep):
-                actual = context.get(step.field)
+                actual: Any = context
+                for part in step.field.replace("[", ".").replace("]", "").split("."):
+                    if not part:
+                        continue
+                    if isinstance(actual, dict):
+                        actual = actual.get(part)
+                    elif isinstance(actual, (list, tuple)) and part.isdigit() and int(part) < len(actual):
+                        actual = actual[int(part)]
+                    else:
+                        actual = None
+                        break
                 if step.operator == "equals":
                     matched = actual == step.value
                 elif step.operator == "not_equals":
                     matched = actual != step.value
                 elif step.operator == "is_empty":
                     matched = actual in (None, "", [], {})
+                elif step.operator == "contains":
+                    try:
+                        matched = step.value in actual
+                    except (TypeError, ValueError):
+                        matched = False
                 else:
                     matched = actual not in (None, "", [], {})
                 output = {"condition_matched": matched, "actual": actual, "operator": step.operator}
@@ -149,7 +171,11 @@ class NativeExecutor:
                     tool_usage=tool_usage,
                 )
             )
-            context.update(output)
+            context["_steps"][step.id] = output
+            # Flat merge kept for condition steps that reference a bare field
+            # name. Same-named keys from different steps still collide here —
+            # prefer the {{step_id.field}} form in new workflows.
+            context.update({key: value for key, value in output.items() if key != "_steps"})
             candidates = outgoing.get(step.id, [])
             if isinstance(step, ConditionStep) and len(candidates) > 1:
                 matched = bool(output["condition_matched"])

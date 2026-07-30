@@ -24,6 +24,7 @@ export function apiDetailToSummary(detail: ApiWorkflowDetail, runs: ApiRun[] = [
     riskLevel: detail.risk_level as WorkflowSummary["riskLevel"],
     trigger: detail.definition.trigger.label,
     ...stats,
+    explanationDetail: detail.explanation_detail,
     definition: {
       apiVersion: "workpilot.io/v1",
       kind: "Workflow",

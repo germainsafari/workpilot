@@ -32,3 +32,22 @@ resource "aws_secretsmanager_secret" "bedrock_region" {
     Name = "${local.project}-${local.env}-secret-bedrock-region"
   }
 }
+
+# Fernet key protecting third-party connection tokens (Scoro, Drive, …) at rest
+# in the `connections` table.
+#
+# Deliberately separate from jwt-secret: app.crypto will derive a key from the
+# JWT secret if this is unset, which means rotating the JWT secret would silently
+# make every stored connection token undecryptable. Keep the two independent.
+#
+# Generate a value with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+resource "aws_secretsmanager_secret" "encryption_key" {
+  name                    = "workpilot/encryption-key"
+  description             = "Fernet key encrypting third-party connection credentials at rest"
+  recovery_window_in_days = 7
+
+  tags = {
+    Name = "${local.project}-${local.env}-secret-encryption-key"
+  }
+}

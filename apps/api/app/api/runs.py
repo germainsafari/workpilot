@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.audit import record_audit
-from app.auth import Principal, current_principal
+from app.auth import Principal, active_principal
 from app.config import get_settings
 from app.db import get_session
 from app.models import AuditEvent, Workflow, WorkflowRun
@@ -38,9 +38,9 @@ async def _workflow_name_map(session: AsyncSession, tenant_id: str, workflow_ids
 async def create_run(
     workflow_id: str,
     payload: RunCreate,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
-) -> WorkflowRun:
+) -> RunRead:
     workflow = await session.scalar(
         select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == principal.tenant_id)
     )
@@ -53,7 +53,13 @@ async def create_run(
         .options(selectinload(WorkflowRun.steps))
     )
     if existing is not None:
-        return existing
+        existing_name = await session.scalar(
+            select(Workflow.name).where(
+                Workflow.id == existing.workflow_id,
+                Workflow.tenant_id == principal.tenant_id,
+            )
+        )
+        return _run_read(existing, existing_name)
     run = WorkflowRun(
         id=f"run-{uuid4()}",
         tenant_id=principal.tenant_id,
@@ -102,8 +108,8 @@ async def create_run(
 
 @router.get("/runs", response_model=list[RunRead])
 async def list_runs(
-    principal: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
-) -> list[WorkflowRun]:
+    principal: Principal = Depends(active_principal), session: AsyncSession = Depends(get_session)
+) -> list[RunRead]:
     result = await session.scalars(
         select(WorkflowRun)
         .where(WorkflowRun.tenant_id == principal.tenant_id)
@@ -119,9 +125,9 @@ async def list_runs(
 @router.get("/runs/{run_id}", response_model=RunRead)
 async def get_run(
     run_id: str,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
-) -> WorkflowRun:
+) -> RunRead:
     run = await session.scalar(
         select(WorkflowRun)
         .where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == principal.tenant_id)
@@ -138,7 +144,7 @@ async def get_run(
 @router.get("/runs/{run_id}/audit", response_model=list[AuditRead])
 async def get_run_audit(
     run_id: str,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
 ) -> list[AuditRead]:
     run = await session.scalar(

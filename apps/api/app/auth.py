@@ -13,9 +13,13 @@ from typing import Any
 import httpx
 import jwt
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import get_session
+from app.models import User
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -222,4 +226,46 @@ async def current_principal(
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required"
+    )
+
+
+async def active_principal(
+    base: Principal = Depends(current_principal),
+    session: AsyncSession = Depends(get_session),
+    x_workpilot_tenant_id: str | None = Header(default=None),
+) -> Principal:
+    """Resolve a requested workspace and verify membership.
+
+    Cognito names a home tenant, but one account may be invited to additional
+    workspaces. The client may request one with ``X-WorkPilot-Tenant-ID``; we
+    accept it only when an active user row with the same verified email exists
+    there. Local header auth already resolves its tenant in
+    ``current_principal`` and therefore remains unchanged.
+    """
+    requested = x_workpilot_tenant_id or base.tenant_id
+    if requested == base.tenant_id:
+        return base
+    if not base.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has no verified email for workspace switching.",
+        )
+    member = await session.scalar(
+        select(User).where(
+            User.tenant_id == requested,
+            func.lower(User.email) == base.email.lower(),
+            User.status == "active",
+        )
+    )
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not an active member of that workspace.",
+        )
+    return Principal(
+        tenant_id=requested,
+        user_id=member.id,
+        role=member.role,
+        email=member.email,
+        name=member.name,
     )

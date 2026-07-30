@@ -26,36 +26,43 @@ from app.runtimes.base import AgentRuntime
 from app.runtimes.factory import get_runtime
 from app.schemas import CanonicalWorkflow
 from app.telemetry import get_tracer
+from app.tool_invoker import McpToolInvoker
 
 tracer = get_tracer("workpilot.run_service")
 
 
-def _resolve_runtime(definition: CanonicalWorkflow) -> AgentRuntime:
+def _resolve_runtime(
+    definition: CanonicalWorkflow, tool_provider: Any | None = None
+) -> AgentRuntime:
     """Return the right runtime for this workflow.
 
-    If the workflow definition specifies a ``runtime_override``, build that
-    runtime directly.  Otherwise fall back to the global factory (env-based).
-    """
-    override = definition.runtime_override
-    if not override:
-        return get_runtime()
+    ``tool_provider`` is handed to the Bedrock runtime so an ``ai_task`` can call
+    the tenant's real (read-only) tools itself, rather than only seeing whatever
+    an upstream ``tool`` step happened to fetch.
 
+    A workflow's ``runtime_override`` wins over the global env setting.
+    """
     from app.config import get_settings
     settings = get_settings()
+    override = definition.runtime_override or settings.agent_runtime
 
     if override == "agentcore":
         from app.runtimes.bedrock_agentcore import BedrockAgentCoreRuntime
         return BedrockAgentCoreRuntime(
             runtime_arn=settings.agentcore_runtime_arn,
             region=settings.bedrock_region,
+            tool_provider=tool_provider,
+            credentials_profile_name=settings.aws_profile,
         )
     if override == "bedrock_langgraph":
         from app.runtimes.bedrock_langgraph import BedrockLangGraphRuntime
         return BedrockLangGraphRuntime(
             model_id=settings.bedrock_model_id,
             region=settings.bedrock_region,
+            tool_provider=tool_provider,
+            credentials_profile_name=settings.aws_profile,
         )
-    # Unknown override — fall back to global
+    # Unknown or "deterministic" — the env-based factory decides.
     return get_runtime()
 
 
@@ -95,8 +102,17 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
         run.status = "running"
         definition = CanonicalWorkflow.model_validate(version.canonical_definition)
         try:
-            runtime: AgentRuntime = _resolve_runtime(definition)
-            results = await NativeExecutor(runtime=runtime).execute(definition, run.trigger_payload)
+            # The invoker holds one MCP session per connection for the whole run
+            # and closes them on exit. It doubles as the agent's tool provider.
+            async with McpToolInvoker(session, principal.tenant_id) as tool_invoker:
+                await tool_invoker.load_catalog()
+                runtime: AgentRuntime = _resolve_runtime(definition, tool_invoker)
+                results = await NativeExecutor(
+                    runtime=runtime, tool_invoker=tool_invoker
+                ).execute(definition, run.trigger_payload)
+
+            total_cost = 0.0
+            total_tokens = 0
             for result in results:
                 now = datetime.utcnow()
                 session.add(
@@ -114,6 +130,13 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
                         tool_usage=result.tool_usage,
                     )
                 )
+                # Roll per-step model usage up onto the run. Without this the
+                # run's total_cost/token_usage stayed at 0 no matter what ran.
+                usage = result.model_usage or {}
+                total_cost += float(usage.get("cost_usd") or 0)
+                total_tokens += int(usage.get("input_tokens") or 0) + int(
+                    usage.get("output_tokens") or 0
+                )
                 span.add_event(
                     "step.completed",
                     {
@@ -121,6 +144,8 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
                         "status": result.status,
                     },
                 )
+            run.total_cost = round(total_cost, 6)
+            run.token_usage = total_tokens
             run.status = "completed"
             run.finished_at = datetime.utcnow()
             run.current_step_id = None
@@ -146,6 +171,10 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
             await record_audit(
                 session, principal, "run.failed", "workflow_run", run.id, {"error_type": type(error).__name__}
             )
+            # Commit before re-raising. Without this the `raise` skipped the
+            # commit below, the transaction rolled back, and a failed run stayed
+            # "queued" forever — the UI showed a spinner instead of the error.
+            await session.commit()
             raise
         await session.commit()
         refreshed = await session.scalar(

@@ -1,7 +1,10 @@
 node_modules
 node_modules.incomplete
 .git
+.env*
+!.env.example
 .next
+.vinext
 dist
 .wrangler
 apps/api/.venv

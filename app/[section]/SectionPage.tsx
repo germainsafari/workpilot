@@ -24,13 +24,29 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { api, formatDuration, formatRelativeTime, parseApiDate, runWorkflowLabel, type ApiRun, type ApiWorkflow } from "../../lib/api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  api,
+  formatDuration,
+  formatRelativeTime,
+  parseApiDate,
+  runWorkflowLabel,
+  type ApiRun,
+  type ApiTeamMember,
+  type ApiWorkflow,
+  type TeamRole,
+} from "../../lib/api";
 import { usesLiveControlPlane } from "../../lib/api-base";
 import { templateCards } from "../../lib/demo-data";
 import { dailyRunCounts, totalAutomationHours, workflowTimeSavedRanking } from "../../lib/workflow-stats";
-import { ConnectModal, type SavedConnection } from "../components/ConnectModal";
-import { loadConnections, removeConnection as removeStoredConnection } from "../../lib/connections";
+import { ConnectModal } from "../components/ConnectModal";
+import {
+  loadConnections,
+  migrateLegacyConnections,
+  removeConnection as removeStoredConnection,
+  testConnection,
+  type SavedConnection,
+} from "../../lib/connections";
 import {
   BUSINESS_CONNECTORS,
   CONNECTOR_CATEGORIES,
@@ -98,8 +114,11 @@ export function Toast({ message, onDone }: { message: string; onDone: () => void
 
 function InviteModal({ onClose }: { onClose: () => void }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState("Operator");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState<TeamRole>("operator");
   const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -114,7 +133,7 @@ function InviteModal({ onClose }: { onClose: () => void }) {
           <div className="modal-body" style={{ alignItems: "center", textAlign: "center", padding: "2rem 1.5rem" }}>
             <span className="modal-icon" style={{ width: 48, height: 48 }}><Check size={24} /></span>
             <h2 style={{ margin: "0.75rem 0 0.25rem" }}>Invitation sent</h2>
-            <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{email} was invited as {role}. They&apos;ll get an email to join Northstar Projects.</p>
+            <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{email} was added as {role.replace(/_/g, " ")}. Their invitation is now tracked in this workspace.</p>
             <button className="primary-button" style={{ marginTop: "1rem" }} onClick={onClose}>Done</button>
           </div>
         </div>
@@ -134,20 +153,45 @@ function InviteModal({ onClose }: { onClose: () => void }) {
         </div>
         <div className="modal-body">
           <label className="form-field">
+            <span>Name</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Casey Lane" />
+          </label>
+          <label className="form-field">
             <span>Email address</span>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
           </label>
           <label className="form-field">
             <span>Role</span>
-            <select value={role} onChange={(e) => setRole(e.target.value)} className="select-field">
-              {["Workflow Admin", "Approver", "Workflow Builder", "Operator"].map((r) => <option key={r}>{r}</option>)}
+            <select value={role} onChange={(e) => setRole(e.target.value as TeamRole)} className="select-field">
+              <option value="workflow_admin">Workflow Admin</option>
+              <option value="workflow_builder">Workflow Builder</option>
+              <option value="approver">Approver</option>
+              <option value="operator">Operator</option>
+              <option value="viewer">Viewer</option>
             </select>
           </label>
+          {error && <div className="modal-error">{error}</div>}
         </div>
         <div className="modal-footer">
           <button className="secondary-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" onClick={() => setSent(true)} disabled={!email.includes("@")}>
-            <Plus size={15} />Send invite
+          <button
+            className="primary-button"
+            onClick={async () => {
+              setSending(true);
+              setError(null);
+              try {
+                await api.team.invite({ email, name, role });
+                window.dispatchEvent(new Event("workpilot:team-changed"));
+                setSent(true);
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Could not add this person");
+              } finally {
+                setSending(false);
+              }
+            }}
+            disabled={!email.includes("@") || name.trim().length < 2 || sending}
+          >
+            {sending ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}Send invite
           </button>
         </div>
       </div>
@@ -395,25 +439,59 @@ function Approvals() {
 }
 
 function Connections() {
-  const [modal, setModal] = useState<{ type: "app" | "mcp"; name?: string; url?: string } | null>(null);
+  const [modal, setModal] = useState<{ type: "app" | "mcp"; name?: string; url?: string; connectorId?: string } | null>(null);
   const [saved, setSaved] = useState<SavedConnection[]>([]);
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<ConnectorCategory | "all">("all");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  useEffect(() => {
-    setSaved(loadConnections());
+  const refresh = useCallback(async () => {
+    try {
+      setLoadError(null);
+      setSaved(await loadConnections());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load connections.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    // Sweep up anything the old localStorage build left behind, then load.
+    // Tokens are not migrated — they were stored in plaintext, so they must be
+    // re-entered rather than trusted.
+    migrateLegacyConnections().finally(refresh);
+  }, [refresh]);
+
   const handleSave = (conn: SavedConnection) => {
-    setSaved((cur) => {
-      const key = conn.url.trim().replace(/\/$/, "");
-      const filtered = cur.filter((c) => c.url.trim().replace(/\/$/, "") !== key);
-      return [...filtered, conn];
-    });
+    setSaved((cur) => [conn, ...cur.filter((c) => c.id !== conn.id)]);
   };
 
-  const removeConnection = (id: string) => {
-    setSaved(removeStoredConnection(id));
+  const removeConnection = async (id: string) => {
+    setBusyId(id);
+    try {
+      await removeStoredConnection(id);
+      setSaved((cur) => cur.filter((c) => c.id !== id));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not remove that connection.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /** Re-handshake and refresh the cached tool catalog. */
+  const retest = async (id: string) => {
+    setBusyId(id);
+    try {
+      const updated = await testConnection(id);
+      setSaved((cur) => cur.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not test that connection.");
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const builtInMcp = [
@@ -422,8 +500,9 @@ function Connections() {
     { name: "Brave Search MCP", url: "npx @modelcontextprotocol/server-brave-search", description: "Live web search (requires Brave API key)", tools: ["brave_web_search"] },
   ];
 
-  const savedMcp = saved.filter((c) => c.type === "mcp");
-  const savedApps = saved.filter((c) => c.type === "app");
+  // One list: everything is server-side now, so an "app" and an "MCP server"
+  // differ only by `kind` and both are managed identically.
+  const savedConnections = saved;
 
   const filteredConnectors = BUSINESS_CONNECTORS.filter((connector) => {
     const matchesCategory = categoryFilter === "all" || connector.category === categoryFilter;
@@ -458,8 +537,94 @@ function Connections() {
 
       <div className="connection-note">
         <ShieldCheck size={18} />
-        <p><strong>{BUSINESS_CONNECTORS.length} connectors ready.</strong> Everything below is pre-configured — click Connect, add your credentials, and assign scopes per workflow. Nothing runs until you connect it.</p>
+        <p>
+          <strong>{BUSINESS_CONNECTORS.length} connectors ready.</strong> Credentials are
+          encrypted server-side and only read at the moment a workflow step calls a
+          tool. WorkPilot is in read-only mode, so workflows can fetch from these
+          systems but never modify them.
+        </p>
       </div>
+
+      {loadError && (
+        <div className="modal-error" style={{ marginBottom: "1rem" }}>
+          <X size={14} /> {loadError}
+          <button className="text-link" style={{ marginLeft: "auto" }} onClick={refresh}>Retry</button>
+        </div>
+      )}
+
+      {loading && (
+        <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "1rem" }}>
+          Loading your connections…
+        </p>
+      )}
+
+      {savedConnections.length > 0 && (
+        <>
+          <h2 style={{ margin: "0 0 0.75rem", fontSize: "1rem", fontWeight: 650 }}>
+            Your connections ({savedConnections.length})
+          </h2>
+          <div className="connection-grid" style={{ marginBottom: "1.5rem" }}>
+            {savedConnections.map((conn) => {
+              const failed = conn.status !== "connected";
+              const writeTools = conn.toolDetails.filter((t) => !t.read_only);
+              return (
+                <article key={conn.id} className={failed ? undefined : "connection-card-connected"}>
+                  <span className="connection-icon connection-icon-brand">
+                    {conn.type === "mcp" ? <Server size={23} /> : <Cloud size={23} />}
+                  </span>
+                  <div>
+                    <h2>{conn.name}</h2>
+                    <StatusPill status={failed ? "Error" : "Connected"} />
+                    <p style={{ fontFamily: "monospace", fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                      {conn.url}
+                    </p>
+                    {conn.hasToken && (
+                      <p style={{ fontSize: "0.7rem", color: "var(--muted)", marginTop: "0.2rem" }}>
+                        Token {conn.tokenHint} · encrypted at rest
+                      </p>
+                    )}
+                    {failed && conn.lastError && (
+                      <p style={{ fontSize: "0.72rem", color: "var(--danger)", marginTop: "0.35rem" }}>
+                        {conn.lastError}
+                      </p>
+                    )}
+                    {conn.toolDetails.length > 0 && (
+                      <div style={{ display: "flex", gap: "0.375rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+                        {conn.toolDetails.map((t) => (
+                          <span key={t.name}
+                            title={`${t.description}${t.read_only ? "" : " — write tool, blocked in read-only mode"}`}
+                            style={{
+                              fontSize: "0.7rem", padding: "0.125rem 0.5rem", borderRadius: "99px",
+                              background: "var(--chip)", color: "var(--chip-ink)",
+                              display: "inline-flex", alignItems: "center", gap: 3,
+                              opacity: t.read_only ? 1 : 0.55,
+                            }}>
+                            <Zap size={10} />{t.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {writeTools.length > 0 && (
+                      <p style={{ fontSize: "0.68rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                        {writeTools.length} write tool{writeTools.length === 1 ? "" : "s"} hidden from
+                        workflows while WorkPilot is read-only.
+                      </p>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.375rem" }}>
+                    <button className="secondary-button" disabled={busyId === conn.id}
+                      onClick={() => retest(conn.id)}>
+                      {busyId === conn.id ? "Testing…" : "Test"}
+                    </button>
+                    <button className="secondary-button" disabled={busyId === conn.id}
+                      onClick={() => removeConnection(conn.id)}>Remove</button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <div className="list-toolbar embedded" style={{ marginBottom: "1rem" }}>
         <label className="table-search">
@@ -499,21 +664,6 @@ function Connections() {
       </div>
 
       <h2 style={{ margin: "1.25rem 0 0.75rem", fontSize: "1rem", fontWeight: 650 }}>Business apps</h2>
-      {savedApps.length > 0 && (
-        <div className="connection-grid" style={{ marginBottom: "1rem" }}>
-          {savedApps.map((conn) => (
-            <article key={conn.id} className="connection-card-connected">
-              <span className="connection-icon connection-icon-brand"><Cloud size={23} /></span>
-              <div>
-                <h2>{conn.name}</h2>
-                <StatusPill status="Connected" />
-                <p style={{ fontFamily: "monospace", fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.25rem" }}>{conn.url}</p>
-              </div>
-              <button className="secondary-button" onClick={() => removeConnection(conn.id)}>Remove</button>
-            </article>
-          ))}
-        </div>
-      )}
 
       {(categoryFilter === "all"
         ? CONNECTOR_CATEGORIES
@@ -571,28 +721,6 @@ function Connections() {
         Model Context Protocol servers expose tools your AI agents can call. Any HTTP MCP-compatible server can be added here.
       </p>
 
-      {savedMcp.length > 0 && (
-        <div className="connection-grid" style={{ marginBottom: "1rem" }}>
-          {savedMcp.map((conn) => (
-            <article key={conn.id} className="connection-card-connected">
-              <span className="connection-icon connection-icon-brand" style={{ background: "#d0f5de" }}><Server size={23} /></span>
-              <div>
-                <h2>{conn.name}</h2>
-                <StatusPill status="Connected" />
-                <p style={{ fontFamily: "monospace", fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.25rem" }}>{conn.url}</p>
-                {conn.tools && (
-                  <div style={{ display: "flex", gap: "0.375rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
-                    {conn.tools.map((t) => (
-                      <span key={t} style={{ fontSize: "0.7rem", padding: "0.125rem 0.5rem", background: "#c0f0cc", borderRadius: "99px", display: "inline-flex", alignItems: "center", gap: 3 }}><Zap size={10} />{t}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <button className="secondary-button" onClick={() => removeConnection(conn.id)}>Remove</button>
-            </article>
-          ))}
-        </div>
-      )}
 
       <div className="connection-grid">
         {builtInMcp.map((srv) => (
@@ -617,34 +745,96 @@ function Connections() {
   );
 }
 
-function Team() {
-  const people = [
-    ["AM", "Alex Morgan", "alex@northstar.example", "Workflow Admin", "Active"],
-    ["MC", "Maya Chen", "maya@northstar.example", "Approver", "Active"],
-    ["PS", "Priya Shah", "priya@northstar.example", "Workflow Builder", "Active"],
-    ["ER", "Elena Rossi", "elena@northstar.example", "Operator", "Invited"],
-  ];
-  return (
-    <section className="panel">
+function Team({ embedded = false }: { embedded?: boolean }) {
+  const [people, setPeople] = useState<ApiTeamMember[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    api.team.list()
+      .then(setPeople)
+      .catch((err) => setError(err instanceof Error ? err.message : "Could not load team"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    window.addEventListener("workpilot:team-changed", refresh);
+    return () => window.removeEventListener("workpilot:team-changed", refresh);
+  }, [refresh]);
+
+  const update = async (person: ApiTeamMember, payload: { role?: TeamRole; status?: "active" | "invited" | "suspended" }) => {
+    setBusy(person.id);
+    setError(null);
+    try {
+      const saved = await api.team.update(person.id, payload);
+      setPeople((current) => current.map((item) => item.id === saved.id ? saved : item));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update this person");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async (person: ApiTeamMember) => {
+    if (!window.confirm(`Remove ${person.name} from this workspace?`)) return;
+    setBusy(person.id);
+    setError(null);
+    try {
+      await api.team.remove(person.id);
+      setPeople((current) => current.filter((item) => item.id !== person.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not remove this person");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const table = (
+    <>
+      {error && <div className="modal-error" style={{ margin: embedded ? "0 0 1rem" : "1rem" }}>{error}</div>}
       <div className="table-wrap">
         <table className="data-table spacious">
           <thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last active</th><th /></tr></thead>
           <tbody>
-            {people.map((person, index) => (
-              <tr key={person[2]}>
+            {loading ? <tr><td colSpan={5}><LoaderCircle size={20} className="spin" /> Loading team…</td></tr> : people.length === 0 ? (
+              <tr><td colSpan={5} className="empty-state compact">No people in this workspace yet.</td></tr>
+            ) : people.map((person, index) => (
+              <tr key={person.id}>
                 <td>
-                  <span className={`avatar ${index % 2 ? "mint" : "lavender"}`}>{person[0]}</span>
-                  <span className="person-cell"><strong>{person[1]}</strong><small>{person[2]}</small></span>
+                  <span className={`avatar ${index % 2 ? "mint" : "lavender"}`}>{person.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span>
+                  <span className="person-cell"><strong>{person.name}</strong><small>{person.email}</small></span>
                 </td>
-                <td>{person[3]}</td>
-                <td><StatusPill status={person[4]} /></td>
-                <td>{index === 3 ? "Not yet" : `${index * 12 + 4} min ago`}</td>
-                <td><button className="icon-button"><MoreHorizontal size={17} /></button></td>
+                <td>
+                  <select className="select-field" value={person.role} disabled={busy === person.id} onChange={(e) => update(person, { role: e.target.value as TeamRole })}>
+                    <option value="workflow_admin">Workflow Admin</option><option value="workflow_builder">Workflow Builder</option><option value="approver">Approver</option><option value="operator">Operator</option><option value="viewer">Viewer</option>
+                  </select>
+                </td>
+                <td><StatusPill status={person.status} /></td>
+                <td>{person.status === "invited" ? "Not yet" : "Active member"}</td>
+                <td>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {person.status === "suspended"
+                      ? <button className="text-link" disabled={busy === person.id} onClick={() => update(person, { status: "active" })}>Restore</button>
+                      : <button className="text-link" disabled={busy === person.id} onClick={() => update(person, { status: "suspended" })}>Suspend</button>}
+                    <button className="danger-link" disabled={busy === person.id} onClick={() => remove(person)}>Remove</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+    </>
+  );
+
+  if (embedded) return table;
+
+  return (
+    <section className="panel">
+      {table}
     </section>
   );
 }
@@ -730,36 +920,133 @@ function Analytics() {
 }
 
 function Settings() {
-  const [safe, setSafe] = useState(true);
-  const [notify, setNotify] = useState(true);
-  const [name, setName] = useState("Northstar Projects");
+  type SettingsTab = "general" | "safety" | "access" | "notifications";
+
+  const tabCopy: Record<SettingsTab, [string, string]> = {
+    general: ["Workspace settings", "Name, data region, and how long run history is kept."],
+    safety: ["Safety policies", "Approval rules, write permissions, and AI cost limits for every run."],
+    access: ["Roles & access", "Manage who can build workflows, approve actions, and operate runs."],
+    notifications: ["Notifications", "Alerts when runs fail or when a reviewer decision is needed."],
+  };
+
+  const [tab, setTab] = useState<SettingsTab>("general");
+  const [name, setName] = useState("");
+  const [settings, setSettings] = useState({
+    require_approval_for_writes: true,
+    max_run_cost_usd: 1,
+    data_region: "eu-central-1",
+    notify_on_run_failure: true,
+    notify_on_approval_needed: true,
+    notify_email: "",
+    retain_run_days: 90,
+  });
+  const [allowToolWrites, setAllowToolWrites] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
+
+  useEffect(() => {
+    Promise.all([api.workspace.get(), api.settings.get()])
+      .then(([workspace, stored]) => {
+        setName(workspace.name);
+        setAllowToolWrites(stored.allow_tool_writes);
+        setSettings({
+          require_approval_for_writes: stored.require_approval_for_writes,
+          max_run_cost_usd: stored.max_run_cost_usd,
+          data_region: stored.data_region,
+          notify_on_run_failure: stored.notify_on_run_failure,
+          notify_on_approval_needed: stored.notify_on_approval_needed,
+          notify_email: stored.notify_email,
+          retain_run_days: stored.retain_run_days,
+        });
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Could not load settings"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      if (tab === "general") {
+        await Promise.all([api.workspace.rename(name.trim()), api.settings.save(settings)]);
+      } else {
+        await api.settings.save(settings);
+      }
+      window.dispatchEvent(new Event("workpilot:workspace-changed"));
+      setSavedToast(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <div className="empty-state"><LoaderCircle size={24} className="spin" /><p>Loading settings…</p></div>;
+
+  const [heading, subtitle] = tabCopy[tab];
+  const showSave = tab !== "access";
+
   return (
     <div className="settings-layout">
       {savedToast && <Toast message="Settings saved" onDone={() => setSavedToast(false)} />}
       <aside className="settings-nav">
-        <button className="active"><Settings2 size={16} />General</button>
-        <button><ShieldCheck size={16} />Safety policies</button>
-        <button><Users size={16} />Roles & access</button>
-        <button><MessageSquare size={16} />Notifications</button>
+        <button type="button" className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><Settings2 size={16} />General</button>
+        <button type="button" className={tab === "safety" ? "active" : ""} onClick={() => setTab("safety")}><ShieldCheck size={16} />Safety policies</button>
+        <button type="button" className={tab === "access" ? "active" : ""} onClick={() => setTab("access")}><Users size={16} />Roles & access</button>
+        <button type="button" className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}><MessageSquare size={16} />Notifications</button>
       </aside>
       <section className="panel settings-panel">
-        <div><h2>Workspace settings</h2><p>These defaults apply to {name}.</p></div>
-        <label className="form-field"><span>Workspace name</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
-        <label className="form-field"><span>Default time zone</span><button className="select-field">Europe/Warsaw</button></label>
-        <hr />
-        <h3>Safety defaults</h3>
-        <Toggle label="Use safe test mode first" description="New workflows simulate external writes until someone explicitly enables them." checked={safe} onChange={setSafe} />
-        <Toggle label="Notify owners about exceptions" description="Send an in-product notification when a run pauses or fails." checked={notify} onChange={setNotify} />
-        <button className="primary-button" onClick={() => setSavedToast(true)}>Save settings</button>
+        <header className="settings-section-head">
+          <h2>{heading}</h2>
+          <p>{subtitle}</p>
+        </header>
+
+        {tab === "general" && (
+          <div className="settings-section">
+            <label className="form-field"><span>Workspace name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Northstar Projects" /></label>
+            <label className="form-field"><span>Data region</span><select className="select-field" value={settings.data_region} onChange={(e) => setSettings((current) => ({ ...current, data_region: e.target.value }))}><option value="eu-central-1">Europe (Frankfurt)</option><option value="eu-west-1">Europe (Ireland)</option><option value="us-east-1">United States (Virginia)</option></select></label>
+            <label className="form-field"><span>Retain run history (days)</span><input type="number" min={1} max={3650} value={settings.retain_run_days} onChange={(e) => setSettings((current) => ({ ...current, retain_run_days: Number(e.target.value) }))} /></label>
+          </div>
+        )}
+
+        {tab === "safety" && (
+          <div className="settings-section">
+            <Toggle label="Require approval for external writes" description="A person must approve before a workflow can modify a connected system." checked={settings.require_approval_for_writes} onChange={(value) => setSettings((current) => ({ ...current, require_approval_for_writes: value }))} />
+            <Toggle label="External writes enabled by deployment" description={allowToolWrites ? "The deployment permits approved write actions." : "This deployment is read-only. Workspace settings cannot override that boundary."} checked={allowToolWrites} onChange={() => {}} disabled />
+            <label className="form-field"><span>Maximum AI cost per run (USD)</span><input type="number" min={0} max={1000} step={0.05} value={settings.max_run_cost_usd} onChange={(e) => setSettings((current) => ({ ...current, max_run_cost_usd: Number(e.target.value) }))} /></label>
+          </div>
+        )}
+
+        {tab === "access" && (
+          <div className="settings-section settings-access">
+            <Team embedded />
+          </div>
+        )}
+
+        {tab === "notifications" && (
+          <div className="settings-section">
+            <Toggle label="Notify on run failure" description="Create an alert when a workflow cannot complete." checked={settings.notify_on_run_failure} onChange={(value) => setSettings((current) => ({ ...current, notify_on_run_failure: value }))} />
+            <Toggle label="Notify when approval is needed" description="Alert reviewers when a run is waiting for a decision." checked={settings.notify_on_approval_needed} onChange={(value) => setSettings((current) => ({ ...current, notify_on_approval_needed: value }))} />
+            <label className="form-field"><span>Notification email</span><input type="email" value={settings.notify_email} onChange={(e) => setSettings((current) => ({ ...current, notify_email: e.target.value }))} placeholder="ops@example.com" /></label>
+          </div>
+        )}
+
+        {error && <div className="modal-error">{error}</div>}
+        {showSave && (
+          <button className="primary-button" disabled={saving || (tab === "general" && name.trim().length < 2)} onClick={save}>
+            {saving ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}Save settings
+          </button>
+        )}
       </section>
     </div>
   );
 }
 
-function Toggle({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange: (value: boolean) => void }) {
+function Toggle({ label, description, checked, onChange, disabled = false }: { label: string; description: string; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
   return (
-    <button className="toggle-row" onClick={() => onChange(!checked)}>
+    <button className="toggle-row" onClick={() => onChange(!checked)} disabled={disabled}>
       <span><strong>{label}</strong><small>{description}</small></span>
       <i className={checked ? "toggle active" : "toggle"}><b /></i>
     </button>

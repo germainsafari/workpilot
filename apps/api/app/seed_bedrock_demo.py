@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import DEMO_TENANT_ID, DEMO_USER_ID
 from app.db import SessionFactory, create_schema, engine
@@ -59,7 +60,7 @@ SAMPLE_INPUT = {
 }
 
 
-async def _ensure_tenant(session) -> None:
+async def _ensure_tenant(session: AsyncSession) -> None:
     tenant = await session.scalar(select(Tenant.id).where(Tenant.id == DEMO_TENANT_ID))
     if tenant is None:
         session.add(

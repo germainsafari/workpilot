@@ -39,7 +39,7 @@ services:
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
       WORKPILOT_EXECUTE_RUNS_INLINE: "false"
-      WORKPILOT_AGENT_RUNTIME: bedrock_langgraph
+      WORKPILOT_AGENT_RUNTIME: ${WORKPILOT_AGENT_RUNTIME:-agentcore}
       WORKPILOT_AGENTCORE_RUNTIME_ARN: ${WORKPILOT_AGENTCORE_RUNTIME_ARN:-}
       WORKPILOT_LOCAL_AUTH_ENABLED: "true"
       WORKPILOT_CORS_ORIGINS: ${WORKPILOT_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
@@ -69,7 +69,7 @@ services:
       WORKPILOT_AUTO_CREATE_SCHEMA: "false"
       WORKPILOT_SEED_DEMO_DATA: "false"
       WORKPILOT_EXECUTE_RUNS_INLINE: "false"
-      WORKPILOT_AGENT_RUNTIME: bedrock_langgraph
+      WORKPILOT_AGENT_RUNTIME: ${WORKPILOT_AGENT_RUNTIME:-agentcore}
       WORKPILOT_AGENTCORE_RUNTIME_ARN: ${WORKPILOT_AGENTCORE_RUNTIME_ARN:-}
     volumes:
       - ${USERPROFILE:-~}/.aws:/root/.aws:ro
@@ -80,6 +80,11 @@ services:
   web:
     build:
       context: .
+      args:
+        NEXT_PUBLIC_CONTROL_PLANE_URL: ${NEXT_PUBLIC_CONTROL_PLANE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_COGNITO_CLIENT_ID: ${NEXT_PUBLIC_COGNITO_CLIENT_ID:-}
+        NEXT_PUBLIC_COGNITO_REGION: ${NEXT_PUBLIC_COGNITO_REGION:-eu-central-1}
+        NEXT_PUBLIC_DEMO_EMAIL: ${NEXT_PUBLIC_DEMO_EMAIL:-}
     env_file: .env
     depends_on:
       api:

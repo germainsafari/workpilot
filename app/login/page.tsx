@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
 import { LoginPage } from "./LoginPage";
 
-export const metadata: Metadata = { title: "Sign in · WorkPilot" };
+export const metadata: Metadata = { title: "Sign in" };
 
-export default function Login() {
-  return (
-    <Suspense>
-      <LoginPage />
-    </Suspense>
-  );
+export default async function Login({
+  searchParams,
+}: {
+  searchParams: Promise<{ reason?: string }>;
+}) {
+  const { reason } = await searchParams;
+  return <LoginPage reason={reason} />;
 }

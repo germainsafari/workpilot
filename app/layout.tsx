@@ -48,9 +48,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      {/* Prevent flash of wrong theme */}
-      <script dangerouslySetInnerHTML={{ __html: `(function(){var t=localStorage.getItem('wp-theme')||'system';var d=t==='system'?window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light':t;document.documentElement.setAttribute('data-theme',d);})();` }} />
+    // suppressHydrationWarning: the script below stamps data-theme on <html>
+    // before React hydrates, so the client attribute intentionally differs from
+    // the server-rendered markup. Without this, every page load logs a
+    // hydration-mismatch error.
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Prevent a flash of the wrong theme. Must live in <head> — a <script>
+            as a direct child of <html> is invalid HTML and React warns on it. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('wp-theme')||'system';var d=t==='system'?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'):t;document.documentElement.setAttribute('data-theme',d);}catch(e){}})();`,
+          }}
+        />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

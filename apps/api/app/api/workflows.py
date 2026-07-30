@@ -7,26 +7,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.audit import record_audit
-from app.auth import Principal, current_principal
+from app.auth import Principal, active_principal
+from app.authoring import (
+    CompileRequest,
+    CompileResponse,
+    WorkflowDetailWithExplanation,
+    build_explanation,
+    compile_description,
+    cost_estimate,
+    explanation_summary,
+    load_tool_catalog,
+)
 from app.db import get_session
 from app.models import Workflow, WorkflowVersion
-from app.schemas import CanonicalWorkflow, WorkflowCreate, WorkflowDetail, WorkflowRead, WorkflowUpdate
+from app.schemas import CanonicalWorkflow, WorkflowCreate, WorkflowRead, WorkflowUpdate
 from app.users import ensure_principal_user
 
 router = APIRouter(prefix="/workflows", tags=["Workflows"])
 
 
 def explanation_for(definition: CanonicalWorkflow) -> str:
-    trigger = definition.trigger.label
-    count = len(definition.steps)
-    return (
-        f"Starts with {trigger.lower()}, completes {count} governed business steps, and records every result."
-    )
+    """The one-line explanation persisted on the version row.
+
+    The structured version — the one the UI renders — is built on read by
+    ``app.authoring.build_explanation``, because it needs the tool catalog and
+    the run history, neither of which is known at write time.
+    """
+    return explanation_summary(definition)
 
 
 @router.get("", response_model=list[WorkflowRead])
 async def list_workflows(
-    principal: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    principal: Principal = Depends(active_principal), session: AsyncSession = Depends(get_session)
 ) -> list[Workflow]:
     result = await session.scalars(
         select(Workflow).where(Workflow.tenant_id == principal.tenant_id).order_by(Workflow.updated_at.desc())
@@ -37,7 +49,7 @@ async def list_workflows(
 @router.post("", response_model=WorkflowRead, status_code=status.HTTP_201_CREATED)
 async def create_workflow(
     payload: WorkflowCreate,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
 ) -> Workflow:
     try:
@@ -77,12 +89,29 @@ async def create_workflow(
     return workflow
 
 
-@router.get("/{workflow_id}", response_model=WorkflowDetail)
+@router.post("/compile", response_model=CompileResponse)
+async def compile_workflow(
+    payload: CompileRequest,
+    principal: Principal = Depends(active_principal),
+    session: AsyncSession = Depends(get_session),
+) -> CompileResponse:
+    """Compile a plain-English description into a validated canonical workflow.
+
+    Always returns a workflow that passes ``CanonicalWorkflow`` validation. When
+    the model could not produce one, ``ai_compiled`` is false and
+    ``compile_error`` says why — the caller is never handed a fallback dressed up
+    as the model's work.
+    """
+    catalog = await load_tool_catalog(session, principal.tenant_id)
+    return await compile_description(payload.description, catalog)
+
+
+@router.get("/{workflow_id}", response_model=WorkflowDetailWithExplanation)
 async def get_workflow(
     workflow_id: str,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
-) -> WorkflowDetail:
+) -> WorkflowDetailWithExplanation:
     workflow = await session.scalar(
         select(Workflow)
         .where(Workflow.id == workflow_id, Workflow.tenant_id == principal.tenant_id)
@@ -93,11 +122,15 @@ async def get_workflow(
     version = next((item for item in workflow.versions if item.id == workflow.active_version_id), None)
     if version is None:
         raise HTTPException(status_code=409, detail="Workflow has no active version")
-    return WorkflowDetail(
+    definition = CanonicalWorkflow.model_validate(version.canonical_definition)
+    catalog = await load_tool_catalog(session, principal.tenant_id)
+    cost = await cost_estimate(session, principal.tenant_id, workflow_id)
+    return WorkflowDetailWithExplanation(
         **WorkflowRead.model_validate(workflow).model_dump(),
         version_number=version.version_number,
-        definition=CanonicalWorkflow.model_validate(version.canonical_definition),
+        definition=definition,
         explanation=version.generated_explanation,
+        explanation_detail=build_explanation(definition, catalog, cost),
         validation_result=version.validation_result,
         runtime_plan=version.runtime_plan,
     )
@@ -107,7 +140,7 @@ async def get_workflow(
 async def update_workflow(
     workflow_id: str,
     payload: WorkflowUpdate,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
 ) -> Workflow:
     workflow = await session.scalar(
@@ -130,7 +163,7 @@ async def update_workflow(
 @router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_workflow(
     workflow_id: str,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(active_principal),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     workflow = await session.scalar(

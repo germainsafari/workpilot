@@ -4,11 +4,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowRight, Blocks, Check, FileText, LayoutTemplate, LoaderCircle, PenLine, ShieldCheck, Sparkles, WandSparkles } from "lucide-react";
 import { useState } from "react";
-import { api, type WorkflowCreatePayload } from "../../../lib/api";
+import { api, type ApiCompileResponse, type WorkflowCreatePayload } from "../../../lib/api";
 import { templateCards } from "../../../lib/demo-data";
 import {
   blankDefinition,
-  buildDefinitionFromDescription,
   countBusinessSteps,
   deriveWorkflowName,
   preparedSummary,
@@ -24,18 +23,32 @@ export function NewWorkflow() {
   const [draftDefinition, setDraftDefinition] = useState<CanonicalDefinition | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compiling, setCompiling] = useState(false);
+  const [compileResult, setCompileResult] = useState<ApiCompileResponse | null>(null);
 
   const resetDraft = () => {
     setPrepared(false);
     setDraftDefinition(null);
+    setCompileResult(null);
     setError(null);
   };
 
-  const prepareDraft = () => {
-    const definition = buildDefinitionFromDescription(description);
-    setDraftDefinition(definition);
-    setPrepared(true);
+  const prepareDraft = async () => {
+    setCompiling(true);
     setError(null);
+    try {
+      const result = await api.workflows.compile(description.trim());
+      setCompileResult(result);
+      setDraftDefinition(result.definition as CanonicalDefinition);
+      setPrepared(true);
+      if (!result.ai_compiled) {
+        setError(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not prepare this workflow");
+    } finally {
+      setCompiling(false);
+    }
   };
 
   const createWorkflow = async (payload: WorkflowCreatePayload) => {
@@ -72,13 +85,22 @@ export function NewWorkflow() {
   };
 
   const saveTemplate = async (name: string, category: string) => {
-    await createWorkflow({
-      name,
-      description: `Created from the ${name} template.`,
-      department: category,
-      risk_level: name.toLowerCase().includes("invoice") ? "high" : "medium",
-      definition: templateDefinition(name),
-    });
+    setCreating(true);
+    setError(null);
+    try {
+      const card = templateCards.find(([cardName]) => cardName === name);
+      const processDescription = `${name}. ${card?.[2] ?? "Produce a useful, evidence-based business result using connected read-only tools."}`;
+      await createWorkflow({
+        name,
+        description: processDescription,
+        department: category,
+        risk_level: name.toLowerCase().includes("invoice") ? "high" : "medium",
+        definition: templateDefinition(name),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create this workflow");
+      setCreating(false);
+    }
   };
 
   const summary = draftDefinition ? preparedSummary(draftDefinition) : null;
@@ -105,11 +127,17 @@ export function NewWorkflow() {
         <textarea id="process-description" value={description} onChange={(event) => setDescription(event.target.value)} />
         <div className="prompt-suggestions"><span>Try including:</span><button onClick={() => setDescription(`${description} Start when a form is submitted.`)}>what starts it</button><button onClick={() => setDescription(`${description} Ask Operations for approval.`)}>who approves</button><button onClick={() => setDescription(`${description} Notify the project owner at the end.`)}>who to notify</button></div>
         <div className="safe-note"><ShieldCheck size={18} /><span><strong>Nothing will run yet.</strong> You’ll review every step, permission, and safeguard before testing or publishing.</span></div>
-        <button className="primary-button large-button" disabled={!description.trim()} onClick={prepareDraft}><Sparkles size={18} />Prepare workflow <ArrowRight size={17} /></button>
+        <button className="primary-button large-button" disabled={!description.trim() || compiling} onClick={prepareDraft}>
+          {compiling ? <><LoaderCircle size={18} className="spin" />Reading connected tools…</> : <><Sparkles size={18} />Prepare workflow <ArrowRight size={17} /></>}
+        </button>
       </section>}
 
       {mode === "describe" && prepared && summary && draftDefinition && <section className="create-card prepared-card">
-        <div className="prepared-success"><span><Check size={20} /></span><div><p className="eyebrow">Draft prepared</p><h2>Your workflow is ready to review</h2><p>We found {stepCount} business step{stepCount === 1 ? "" : "s"} and no live writes.</p></div></div>
+        <div className="prepared-success"><span><Check size={20} /></span><div><p className="eyebrow">Draft prepared</p><h2>Your workflow is ready to review</h2><p>We found {stepCount} business step{stepCount === 1 ? "" : "s"}, bound {compileResult?.bound_tools.length ?? 0} connected tool{compileResult?.bound_tools.length === 1 ? "" : "s"}, and no live writes.</p></div></div>
+        {compileResult?.rationale && !compileResult.ai_compiled && (
+          <p className="safe-note"><ShieldCheck size={18} /><span>{compileResult.rationale}</span></p>
+        )}
+        {compileResult?.rationale && compileResult.ai_compiled && <p className="safe-note">{compileResult.rationale}</p>}
         <div className="prepared-summary">
           <div><FileText size={18} /><span><strong>Starts with</strong><small>{summary.starts}</small></span></div>
           <div><WandSparkles size={18} /><span><strong>Work performed</strong><small>{summary.work}</small></span></div>

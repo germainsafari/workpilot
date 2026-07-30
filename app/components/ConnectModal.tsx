@@ -2,37 +2,51 @@
 
 import { Check, ExternalLink, Key, Link2, LoaderCircle, Server, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { normalizeMcpEndpoint, persistConnection } from "../../lib/connections";
+import {
+  createConnection,
+  isRestVendor,
+  normalizeMcpEndpoint,
+  type SavedConnection,
+} from "../../lib/connections";
 import { resolveKnownService } from "../../lib/connectors";
 
-export interface SavedConnection {
-  id: string;
-  name: string;
-  url: string;
-  type: "app" | "mcp";
-  token?: string;
-  status: "connected" | "error";
-  tools?: string[];
-  connectedAt: string;
-}
+export type { SavedConnection };
 
 interface Props {
   type: "app" | "mcp";
   defaultName?: string;
   defaultUrl?: string;
+  connectorId?: string;
   onClose: () => void;
   onSave: (conn: SavedConnection) => void;
 }
 
-type Phase = "form" | "probing" | "success" | "error";
+type Phase = "form" | "saving" | "success" | "error";
 
-export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose, onSave }: Props) {
+/**
+ * Connect a third-party system.
+ *
+ * The handshake happens on the server, not here. The previous version probed
+ * from the browser and — when CORS blocked it — fell back to an opaque `no-cors`
+ * GET and reported **success**, so "Server reachable" could appear when tool
+ * discovery had entirely failed. It also wrote the API token to localStorage in
+ * plaintext. Now `POST /v1/connections` performs `initialize` + `tools/list`
+ * server-side, encrypts the token, and returns the true status.
+ */
+export function ConnectModal({
+  type,
+  defaultName = "",
+  defaultUrl = "",
+  connectorId,
+  onClose,
+  onSave,
+}: Props) {
   const [name, setName] = useState(defaultName);
   const [url, setUrl] = useState(defaultUrl);
   const [token, setToken] = useState("");
   const [phase, setPhase] = useState<Phase>("form");
   const [errMsg, setErrMsg] = useState("");
-  const [tools, setTools] = useState<string[]>([]);
+  const [result, setResult] = useState<SavedConnection | null>(null);
   const urlRef = useRef<HTMLInputElement>(null);
 
   const service = resolveKnownService(url, name);
@@ -45,128 +59,59 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const probe = async () => {
-    if (!url.trim()) { setErrMsg("URL is required"); return; }
-    setPhase("probing");
+  const submit = async () => {
+    const trimmed = url.trim();
+    if (!trimmed) { setErrMsg("URL is required"); setPhase("error"); return; }
+
+    const endpoint = normalizeMcpEndpoint(trimmed, service?.hostname);
+    if (endpoint !== trimmed) setUrl(endpoint);
+
+    setPhase("saving");
     setErrMsg("");
 
-    const trimmed = url.trim();
-    const endpoint = normalizeMcpEndpoint(trimmed, service?.hostname);
-    if (endpoint !== trimmed.replace(/\/$/, "")) {
-      setUrl(endpoint);
-    }
-    const mcpHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream",
-    };
-    if (token) mcpHeaders["Authorization"] = `Bearer ${token}`;
+    // Known REST vendors (Scoro) always go over REST, even when the user picked
+    // "MCP server" — their MCP endpoint needs a JWT an API key cannot satisfy.
+    const rest = isRestVendor(service?.hostname);
+    const kind: "mcp" | "api_key" = rest
+      ? "api_key"
+      : type === "mcp" || endpoint.toLowerCase().endsWith("/mcp")
+        ? "mcp"
+        : "api_key";
 
-    let discoveredTools: string[] = [];
-
-    const parseSse = (text: string): unknown => {
-      for (const line of text.split("\n")) {
-        if (line.startsWith("data:")) {
-          try { return JSON.parse(line.slice(5).trim()); } catch { /* skip */ }
-        }
-      }
-      try { return JSON.parse(text); } catch { return null; }
-    };
+    // connector_id selects the server-side REST connector, so it must be the
+    // stable slug ("scoro"), not a display label.
+    const resolvedConnectorId =
+      connectorId ??
+      (service?.hostname ? service.hostname.replace(/\.com$/, "") : undefined) ??
+      "custom";
 
     try {
-      // Step 1: MCP initialize — required to obtain session ID
-      const initResp = await fetch(endpoint, {
-        method: "POST",
-        headers: mcpHeaders,
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1, method: "initialize",
-          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "workpilot-ui", version: "1" } },
-        }),
-        signal: AbortSignal.timeout(8000),
+      const conn = await createConnection({
+        name: name.trim() || endpoint,
+        connector_id: resolvedConnectorId,
+        kind,
+        base_url: endpoint,
+        token: token || undefined,
       });
+      setResult(conn);
+      onSave(conn);
 
-      if (!initResp.ok) {
-        if (initResp.status === 401) throw new Error("auth_required");
-        throw new Error(`Server returned ${initResp.status}`);
-      }
-
-      const sessionId = initResp.headers.get("mcp-session-id");
-      const toolsHeaders = { ...mcpHeaders };
-      if (sessionId) toolsHeaders["mcp-session-id"] = sessionId;
-
-      // Step 2: tools/list
-      const toolsResp = await fetch(endpoint, {
-        method: "POST",
-        headers: toolsHeaders,
-        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
-        signal: AbortSignal.timeout(8000),
-      });
-
-      if (toolsResp.ok) {
-        const raw = await toolsResp.text();
-        const data = parseSse(raw) as { result?: { tools?: Array<{ name: string }> } } | null;
-        if (data?.result?.tools) {
-          discoveredTools = data.result.tools.map((t) => t.name).slice(0, 8);
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
-
-      if (msg === "auth_required") {
+      if (conn.status === "connected") {
+        setPhase("success");
+      } else {
         setPhase("error");
         setErrMsg(
-          service
-            ? `${service.label} requires an API token. Use the link above to get yours, then paste it in the token field and try again.`
-            : "Server requires authentication. Add your API key or Bearer token above and try again."
+          conn.lastError ??
+            "Saved, but the server could not be reached. Check the URL and token, then press Test again.",
         );
-        return;
       }
-
-      // CORS or network failure — try a no-cors GET to at least confirm reachability
-      try {
-        await fetch(url.trim(), { method: "GET", mode: "no-cors", signal: AbortSignal.timeout(5000) });
-        // Opaque response means server is reachable but CORS blocks discovery
-        setTools([]);
-        setPhase("success");
-        return;
-      } catch {
-        setPhase("error");
-        setErrMsg("Could not reach the server. Check the URL, ensure it is running, and that CORS allows this origin.");
-        return;
-      }
+    } catch (err) {
+      setPhase("error");
+      setErrMsg(err instanceof Error ? err.message : "Could not save this connection.");
     }
-
-    setTools(discoveredTools);
-    setPhase("success");
   };
 
-  const save = () => {
-    if (!url.trim()) {
-      setErrMsg("URL is required");
-      setPhase("error");
-      return;
-    }
-
-    const endpoint = normalizeMcpEndpoint(url.trim(), service?.hostname);
-    const conn: SavedConnection = {
-      id: crypto.randomUUID(),
-      name: name.trim() || endpoint,
-      url: endpoint,
-      type: type === "app" && service?.hostname === "scoro.com" ? "mcp" : type,
-      token: token || undefined,
-      status: phase === "error" ? "error" : "connected",
-      tools: tools.length ? tools : undefined,
-      connectedAt: new Date().toISOString(),
-    };
-
-    try {
-      persistConnection(conn);
-      onSave(conn);
-      onClose();
-    } catch {
-      setPhase("error");
-      setErrMsg("Could not save this connection. Check that your browser allows local storage.");
-    }
-  };
+  const discovered = result?.toolDetails ?? [];
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -177,8 +122,8 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
             <div>
               <h2>{type === "mcp" ? "Connect MCP server" : "Connect app"}</h2>
               <p>{type === "mcp"
-                ? "Add any Model Context Protocol server — your AI agents can then call its tools"
-                : "Add a business app for your workflows to read from or write to"}</p>
+                ? "Add any Model Context Protocol server — your workflows can then call its tools"
+                : "Add a business app for your workflows to read from"}</p>
             </div>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
@@ -188,18 +133,18 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
           <label className="form-field">
             <span>Display name</span>
             <input value={name} onChange={(e) => setName(e.target.value)}
+              disabled={phase === "saving" || phase === "success"}
               placeholder={type === "mcp" ? "e.g. Scoro MCP" : "e.g. Company Drive"} />
           </label>
 
           <label className="form-field">
-            <span>{type === "mcp" ? "MCP server URL" : service ? `${service.label} site address` : "API / OAuth endpoint"}</span>
+            <span>{type === "mcp" ? "MCP server URL" : service ? `${service.label} site address` : "API endpoint"}</span>
             <input ref={urlRef} value={url} onChange={(e) => setUrl(e.target.value)}
               type="url"
-              placeholder={type === "mcp" ? "https://yourapp.scoro.com/mcp" : service ? service.urlPlaceholder : "https://api.example.com/oauth"}
-              disabled={phase === "probing" || phase === "success"} />
+              placeholder={type === "mcp" ? "https://yourapp.scoro.com/mcp" : service ? service.urlPlaceholder : "https://api.example.com"}
+              disabled={phase === "saving" || phase === "success"} />
           </label>
 
-          {/* Service-specific auth guide — shown as soon as a known service is detected */}
           {service && phase !== "success" && (
             <div className="modal-service-hint">
               <span className="modal-service-icon">{service.icon}</span>
@@ -221,51 +166,54 @@ export function ConnectModal({ type, defaultName = "", defaultUrl = "", onClose,
           <label className="form-field">
             <span><Key size={13} style={{ display: "inline", marginRight: 4 }} />
               {service ? `${service.label} API token` : "API key / Bearer token"}
-              {" "}<em style={{ color: "var(--muted)", fontStyle: "normal" }}>(optional for public servers)</em>
+              {" "}<em style={{ color: "var(--muted)", fontStyle: "normal" }}>(leave empty for public servers)</em>
             </span>
             <input value={token} onChange={(e) => setToken(e.target.value)}
               type="password"
-              placeholder={service ? `Paste your ${service.label} API token here` : "sk-… or leave empty for public servers"}
-              disabled={phase === "probing" || phase === "success"} />
+              placeholder={service ? `Paste your ${service.label} API token` : "sk-… or leave empty"}
+              disabled={phase === "saving" || phase === "success"} />
+            <small style={{ color: "var(--muted)", marginTop: 4, display: "block" }}>
+              Encrypted before it is stored. It is never sent back to the browser.
+            </small>
           </label>
 
           {phase === "error" && (
             <div className="modal-error">
               <X size={14} /> {errMsg}
-              <button className="text-link" style={{ marginLeft: "auto" }} onClick={() => setPhase("form")}>Try again</button>
+              <button className="text-link" style={{ marginLeft: "auto" }}
+                onClick={() => { setPhase("form"); setErrMsg(""); }}>Try again</button>
             </div>
           )}
 
           {phase === "success" && (
             <div className="modal-success">
-              <Check size={14} /> Server reachable{tools.length > 0 ? ` — ${tools.length} tools discovered` : ""}
-              {tools.length > 0 && (
+              <Check size={14} />
+              {discovered.length > 0
+                ? `Connected — ${discovered.length} tool${discovered.length === 1 ? "" : "s"} discovered`
+                : "Connected, but this server advertises no tools"}
+              {discovered.length > 0 && (
                 <div className="modal-tools">
-                  {tools.map((t) => <span key={t}><Zap size={10} />{t}</span>)}
+                  {discovered.slice(0, 12).map((t) => (
+                    <span key={t.name} title={`${t.description}${t.read_only ? "" : " (write — blocked in read-only mode)"}`}>
+                      <Zap size={10} />{t.name}{t.read_only ? "" : " ⚠"}
+                    </span>
+                  ))}
                 </div>
               )}
-            </div>
-          )}
-
-          {type === "mcp" && phase === "form" && !service && (
-            <div className="modal-hint">
-              <ExternalLink size={13} />
-              <span>Popular servers: <code>npx @modelcontextprotocol/server-filesystem</code> · <code>npx @modelcontextprotocol/server-brave-search</code></span>
             </div>
           )}
         </div>
 
         <div className="modal-footer">
-          <button className="secondary-button" onClick={onClose}>Cancel</button>
-          {phase === "success" ? (
-            <button className="primary-button" onClick={save}><Check size={15} />Save connection</button>
-          ) : phase === "error" ? (
-            <button className="primary-button" onClick={save}><Check size={15} />Save anyway</button>
-          ) : (
-            <button className="primary-button" onClick={probe} disabled={phase === "probing" || !url.trim()}>
-              {phase === "probing"
-                ? <><LoaderCircle size={15} className="spin" />Testing…</>
-                : <><Link2 size={15} />Test & connect</>}
+          <button className="secondary-button" onClick={onClose}>
+            {phase === "success" ? "Done" : "Cancel"}
+          </button>
+          {phase !== "success" && (
+            <button className="primary-button" onClick={submit}
+              disabled={phase === "saving" || !url.trim()}>
+              {phase === "saving"
+                ? <><LoaderCircle size={15} className="spin" />Connecting…</>
+                : <><Link2 size={15} />Test &amp; connect</>}
             </button>
           )}
         </div>

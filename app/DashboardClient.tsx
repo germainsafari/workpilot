@@ -11,6 +11,10 @@ export function DashboardClient() {
   const [runs, setRuns] = useState<ApiRun[]>([]);
   const [workflows, setWorkflows] = useState<ApiWorkflow[]>([]);
   const [loading, setLoading] = useState(true);
+  // Keep the server render and the browser's first render identical. The
+  // browser can be in a different timezone from the SSR process, so deriving
+  // this during render causes "afternoon" / "evening" hydration mismatches.
+  const [welcome, setWelcome] = useState({ greeting: "Welcome back", date: "Today" });
 
   const loadDashboard = useCallback(() => {
     setLoading(true);
@@ -24,13 +28,28 @@ export function DashboardClient() {
   }, []);
 
   useEffect(() => {
+    const now = new Date();
+    const hour = now.getHours();
+    setWelcome({
+      greeting: hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening",
+      date: now.toLocaleDateString("en-GB", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      }),
+    });
+
     loadDashboard();
     const refresh = () => loadDashboard();
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", () => {
+    const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") refresh();
-    });
-    return () => window.removeEventListener("focus", refresh);
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, [loadDashboard]);
 
   const todayRuns = runsToday(runs);
@@ -54,16 +73,12 @@ export function DashboardClient() {
   const recentRuns = runs.slice(0, 4);
   const activeWorkflows = workflows.filter((w) => w.status === "active").slice(0, 3);
 
-  const now = new Date();
-  const greeting = now.getHours() < 12 ? "Good morning" : now.getHours() < 18 ? "Good afternoon" : "Good evening";
-  const dateStr = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
-
   return (
     <div className="page dashboard-page">
       <section className="welcome-row">
         <div>
-          <p className="eyebrow">{dateStr}</p>
-          <h1>{greeting}.</h1>
+          <p className="eyebrow">{welcome.date}</p>
+          <h1>{welcome.greeting}.</h1>
           <p className="page-subtitle">Here&apos;s what your team&apos;s processes are doing today.</p>
         </div>
         <Link href="/workflows/new" className="primary-button"><Plus size={18} />Create workflow</Link>

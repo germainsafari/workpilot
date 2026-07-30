@@ -1,18 +1,25 @@
 import { describeApiBase, getApiBase, isLocalControlPlane } from "./api-base";
+import {
+  DEMO_WORKSPACE,
+  DEMO_WORKSPACE_SETTINGS,
+  isMissingEndpointError,
+  localCompileFallback,
+} from "./api-fallbacks";
 
 const DEMO_TENANT = "tenant-northstar";
 
 function authHeaders(): Record<string, string> {
   if (typeof window === "undefined") return { "X-WorkPilot-Tenant-ID": DEMO_TENANT };
+  const activeWorkspace = localStorage.getItem("wp-workspace-id") || DEMO_TENANT;
 
   // Local FastAPI accepts the tenant header stub; Cognito tokens are for staging/production.
   if (isLocalControlPlane()) {
-    return { "X-WorkPilot-Tenant-ID": DEMO_TENANT };
+    return { "X-WorkPilot-Tenant-ID": activeWorkspace };
   }
 
   const jwt = localStorage.getItem("wp-jwt");
-  if (jwt) return { Authorization: `Bearer ${jwt}` };
-  return { "X-WorkPilot-Tenant-ID": DEMO_TENANT };
+  if (jwt) return { Authorization: `Bearer ${jwt}`, "X-WorkPilot-Tenant-ID": activeWorkspace };
+  return { "X-WorkPilot-Tenant-ID": activeWorkspace };
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -66,6 +73,7 @@ export interface ApiCanonicalStep {
   id: string;
   name: string;
   type: "ai_task" | "tool" | "condition" | "wait" | "end";
+  [key: string]: unknown;
 }
 
 export interface ApiEdge {
@@ -83,6 +91,53 @@ export interface ApiWorkflowDetail extends ApiWorkflow {
     edges: ApiEdge[];
   };
   explanation: string;
+  explanation_detail: ApiWorkflowExplanation;
+  validation_result: Record<string, unknown>;
+  runtime_plan: Record<string, unknown>;
+}
+
+export interface ApiWorkflowExplanation {
+  summary: string;
+  trigger: string;
+  steps: Array<{
+    order: number;
+    step_id: string;
+    name: string;
+    type: string;
+    detail: string;
+    binding: string | null;
+  }>;
+  approval: string;
+  on_failure: string;
+  safeguards: string[];
+  cost: {
+    sample_size: number;
+    average_cost_usd: number | null;
+    average_tokens: number | null;
+    headline: string;
+    caption: string;
+  };
+}
+
+export interface ApiCompileResponse {
+  definition: WorkflowCreatePayload["definition"];
+  rationale: string;
+  ai_compiled: boolean;
+  compile_error: string | null;
+  bound_tools: Array<{
+    step_id: string;
+    step_name: string;
+    connection_id: string;
+    connection_name: string;
+    tool_name: string;
+  }>;
+  dropped_bindings: Array<{
+    step_id: string;
+    connection_id: string | null;
+    tool_name: string | null;
+    reason: string;
+  }>;
+  catalog_size: number;
 }
 
 export interface WorkflowCreatePayload {
@@ -103,11 +158,20 @@ export interface ApiStepRun {
   id: string;
   step_id: string;
   status: string;
+  attempt?: number;
   model_usage: Record<string, unknown>;
+  /**
+   * What the step did against a connected system: `invoked`, `tool_name`,
+   * `connection_name`, `arguments`, `duration_ms`, `result` summary — or
+   * `invoked: false` with a `reason` when nothing was called. The API has always
+   * returned this; it simply was not typed, so the UI could not display it.
+   */
+  tool_usage: Record<string, unknown>;
   started_at: string;
   finished_at: string | null;
   input_data: Record<string, unknown>;
   output_data: Record<string, unknown>;
+  error: string | null;
 }
 
 export interface ApiRun {
@@ -160,6 +224,115 @@ export function runWorkflowLabel(run: ApiRun, workflows?: ApiWorkflow[]): string
   return match?.name ?? run.workflow_id;
 }
 
+// ──────────────────────────────────────────────── Connections ──
+
+export interface ApiConnectionTool {
+  name: string;
+  description: string;
+  read_only: boolean;
+  input_schema: Record<string, unknown>;
+}
+
+/**
+ * A stored connection. The credential is never returned by the API — only
+ * `has_token` and a masked `token_hint`.
+ */
+export interface ApiConnection {
+  id: string;
+  connector_id: string;
+  name: string;
+  kind: "mcp" | "api_key";
+  base_url: string;
+  status: "connected" | "error" | "untested";
+  has_token: boolean;
+  token_hint: string;
+  tools: ApiConnectionTool[];
+  server_info: Record<string, unknown>;
+  last_error: string | null;
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAvailableTool {
+  connection_id: string;
+  connection_name: string;
+  connector_id: string;
+  tool_name: string;
+  description: string;
+  read_only: boolean;
+  input_schema: Record<string, unknown>;
+}
+
+export interface ConnectionCreatePayload {
+  name: string;
+  connector_id?: string;
+  kind: "mcp" | "api_key";
+  base_url: string;
+  /** Write-only. Encrypted server-side and never echoed back. */
+  token?: string;
+}
+
+export interface ConnectionUpdatePayload {
+  name?: string;
+  base_url?: string;
+  token?: string;
+}
+
+export type TeamRole =
+  | "workflow_admin"
+  | "workflow_builder"
+  | "approver"
+  | "operator"
+  | "viewer";
+
+export interface ApiTeamMember {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  status: "active" | "invited" | "suspended" | string;
+  locale: string;
+  timezone: string;
+}
+
+export interface TeamInvitePayload {
+  email: string;
+  name: string;
+  role: TeamRole;
+}
+
+export interface TeamMemberUpdatePayload {
+  name?: string;
+  role?: TeamRole;
+  status?: "active" | "invited" | "suspended";
+}
+
+export interface ApiWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  data_region: string;
+  member_count: number;
+  workflow_count: number;
+}
+
+export interface ApiWorkspaceSettings {
+  allow_tool_writes: boolean;
+  require_approval_for_writes: boolean;
+  max_run_cost_usd: number;
+  data_region: string;
+  notify_on_run_failure: boolean;
+  notify_on_approval_needed: boolean;
+  notify_email: string;
+  retain_run_days: number;
+}
+
+export type WorkspaceSettingsPayload = Partial<
+  Omit<ApiWorkspaceSettings, "allow_tool_writes">
+>;
+
 // ──────────────────────────────────────────────── API calls ──
 
 export const api = {
@@ -170,6 +343,17 @@ export const api = {
       apiFetch("/v1/workflows", { method: "POST", body: JSON.stringify(payload) }),
     updateStatus: (id: string, status: "active" | "draft" | "paused"): Promise<ApiWorkflow> =>
       apiFetch(`/v1/workflows/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+    compile: async (description: string): Promise<ApiCompileResponse> => {
+      try {
+        return await apiFetch("/v1/workflows/compile", {
+          method: "POST",
+          body: JSON.stringify({ description }),
+        });
+      } catch (error) {
+        if (isMissingEndpointError(error)) return localCompileFallback(description);
+        throw error;
+      }
+    },
   },
   runs: {
     list: (): Promise<ApiRun[]> => apiFetch("/v1/runs?limit=100"),
@@ -179,6 +363,84 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ input, trigger_type: "manual" }),
       }),
+  },
+  connections: {
+    list: (): Promise<ApiConnection[]> => apiFetch("/v1/connections"),
+    /** Every callable tool across all connected servers — what the compiler binds against. */
+    tools: (): Promise<ApiAvailableTool[]> => apiFetch("/v1/connections/tools"),
+    create: (payload: ConnectionCreatePayload): Promise<ApiConnection> =>
+      apiFetch("/v1/connections", { method: "POST", body: JSON.stringify(payload) }),
+    update: (id: string, payload: ConnectionUpdatePayload): Promise<ApiConnection> =>
+      apiFetch(`/v1/connections/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+    /** Re-handshake and refresh the cached tool catalog. */
+    test: (id: string): Promise<ApiConnection> =>
+      apiFetch(`/v1/connections/${id}/test`, { method: "POST" }),
+    remove: (id: string): Promise<void> =>
+      apiFetch(`/v1/connections/${id}`, { method: "DELETE" }),
+  },
+  team: {
+    list: async (): Promise<ApiTeamMember[]> => {
+      try {
+        return await apiFetch("/v1/team");
+      } catch (error) {
+        if (isMissingEndpointError(error)) return [];
+        throw error;
+      }
+    },
+    /** Creates the member with status "invited". No email is sent yet. */
+    invite: (payload: TeamInvitePayload): Promise<ApiTeamMember> =>
+      apiFetch("/v1/team", { method: "POST", body: JSON.stringify(payload) }),
+    update: (id: string, payload: TeamMemberUpdatePayload): Promise<ApiTeamMember> =>
+      apiFetch(`/v1/team/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+    /** 409s when the target is you, the last workflow_admin, or still owns workflows. */
+    remove: (id: string): Promise<void> =>
+      apiFetch(`/v1/team/${id}`, { method: "DELETE" }),
+  },
+  workspace: {
+    get: async (): Promise<ApiWorkspace> => {
+      try {
+        return await apiFetch("/v1/workspace");
+      } catch (error) {
+        if (isMissingEndpointError(error)) return DEMO_WORKSPACE;
+        throw error;
+      }
+    },
+    available: async (): Promise<ApiWorkspace[]> => {
+      try {
+        return await apiFetch("/v1/workspace/available");
+      } catch (error) {
+        if (isMissingEndpointError(error)) return [DEMO_WORKSPACE];
+        throw error;
+      }
+    },
+    /** Rename only — the slug is immutable server-side. */
+    rename: async (name: string): Promise<ApiWorkspace> => {
+      try {
+        return await apiFetch("/v1/workspace", { method: "PATCH", body: JSON.stringify({ name }) });
+      } catch (error) {
+        if (isMissingEndpointError(error)) return { ...DEMO_WORKSPACE, name };
+        throw error;
+      }
+    },
+  },
+  settings: {
+    get: async (): Promise<ApiWorkspaceSettings> => {
+      try {
+        return await apiFetch("/v1/workspace/settings");
+      } catch (error) {
+        if (isMissingEndpointError(error)) return DEMO_WORKSPACE_SETTINGS;
+        throw error;
+      }
+    },
+    /** Merges over what is stored; omitted keys keep their saved value. */
+    save: async (payload: WorkspaceSettingsPayload): Promise<ApiWorkspaceSettings> => {
+      try {
+        return await apiFetch("/v1/workspace/settings", { method: "PUT", body: JSON.stringify(payload) });
+      } catch (error) {
+        if (isMissingEndpointError(error)) return { ...DEMO_WORKSPACE_SETTINGS, ...payload };
+        throw error;
+      }
+    },
   },
 };
 

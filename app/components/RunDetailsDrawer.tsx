@@ -40,6 +40,7 @@ export function RunDetailsDrawer({
   const [error, setError] = useState<string | null>(null);
   const [openStep, setOpenStep] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -78,6 +79,25 @@ export function RunDetailsDrawer({
 
   const steps = run?.steps ?? [];
   const aiSteps = steps.filter((s) => s.model_usage && Object.keys(s.model_usage).length > 0);
+
+  const rerun = async () => {
+    if (!run) return;
+    setRerunning(true);
+    setError(null);
+    try {
+      let next = await api.runs.trigger(run.workflow_id, { source: "run_again", previous_run_id: run.id });
+      setRun(next);
+      for (let attempt = 0; attempt < 60 && !["completed", "failed"].includes(next.status); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, attempt < 10 ? 700 : 2000));
+        next = await api.runs.get(next.id);
+        setRun(next);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not run this workflow again");
+    } finally {
+      setRerunning(false);
+    }
+  };
 
   return (
     <>
@@ -172,7 +192,8 @@ export function RunDetailsDrawer({
                 const isOpen = openStep === step.id;
                 const hasDetail =
                   (step.input_data && Object.keys(step.input_data).length > 0) ||
-                  (step.output_data && Object.keys(step.output_data).length > 0);
+                  (step.output_data && Object.keys(step.output_data).length > 0) ||
+                  (step.tool_usage && Object.keys(step.tool_usage).length > 0);
                 return (
                   <div className={done ? "test-step done" : "test-step"} key={step.id}>
                     <span>{done ? <Check size={15} /> : index + 1}</span>
@@ -202,6 +223,12 @@ export function RunDetailsDrawer({
                               <pre>{prettyJson(step.output_data)}</pre>
                             </>
                           )}
+                          {step.tool_usage && Object.keys(step.tool_usage).length > 0 && (
+                            <>
+                              <span>Connected tool activity</span>
+                              <pre>{prettyJson(step.tool_usage)}</pre>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
@@ -218,6 +245,10 @@ export function RunDetailsDrawer({
                 {run.trace_id ? `${run.trace_id.slice(0, 16)}…` : "no trace id"}
               </button>
               <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem" }}>
+                <button className="secondary-button" disabled={rerunning} onClick={rerun}>
+                  {rerunning ? <LoaderCircle size={14} className="spin" /> : <Play size={14} />}
+                  {rerunning ? "Running…" : "Run again"}
+                </button>
                 <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>
                   {aiSteps.length} AI step{aiSteps.length === 1 ? "" : "s"}
                 </span>

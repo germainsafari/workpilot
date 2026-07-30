@@ -187,7 +187,6 @@ export function templateDefinition(templateName: string): CanonicalDefinition {
 }
 
 export function preparedSummary(definition: CanonicalDefinition): { starts: string; work: string; safeguard: string } {
-  const first = definition.steps[0];
   const hasAi = definition.steps.some((s) => s.type === "ai_task");
   const hasTool = definition.steps.some((s) => s.type === "tool");
   return {

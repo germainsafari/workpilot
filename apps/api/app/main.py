@@ -6,8 +6,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.connections import router as connections_router
 from app.api.runs import router as runs_router
+from app.api.team import router as team_router
 from app.api.workflows import router as workflows_router
+from app.api.workspace import router as workspace_router
 from app.config import get_settings
 from app.db import create_schema
 from app.telemetry import configure_telemetry, instrument_fastapi
@@ -48,11 +51,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # PUT is here for /v1/workspace/settings — without it the browser preflight fails.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-WorkPilot-Tenant-ID", "X-WorkPilot-User-ID"],
 )
 app.include_router(workflows_router, prefix="/v1")
 app.include_router(runs_router, prefix="/v1")
+app.include_router(connections_router, prefix="/v1")
+app.include_router(team_router, prefix="/v1")
+app.include_router(workspace_router, prefix="/v1")
 
 
 @app.get("/health", tags=["System"])

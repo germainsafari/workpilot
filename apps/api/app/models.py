@@ -3,6 +3,8 @@
 The data model is deliberately tenant-scoped: ``Tenant`` → ``User`` → ``Workflow``
 → ``WorkflowVersion`` (immutable, versioned canonical definition) → ``WorkflowRun``
 → ``StepRun``. ``AuditEvent`` is an append-only, per-tenant hash-chained log.
+``Connection`` stores a tenant's third-party credentials (encrypted) plus the
+tool catalog discovered from that system.
 
 Key constraints worth noting:
 * ``workflow_versions`` is unique on (workflow_id, version_number).
@@ -120,6 +122,34 @@ class StepRun(Base):
     tool_usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     run: Mapped[WorkflowRun] = relationship(back_populates="steps")
+
+
+class Connection(Base):
+    """A tenant's credentialed link to a third-party system.
+
+    ``encrypted_token`` holds a Fernet ciphertext (see ``app.crypto``) — never a
+    plaintext credential. ``tool_catalog`` caches what ``tools/list`` returned at
+    the last successful handshake so the workflow compiler and the UI can offer
+    real tool names without re-probing the server on every request.
+    """
+
+    __tablename__ = "connections"
+    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    connector_id: Mapped[str] = mapped_column(String(80), default="custom")
+    name: Mapped[str] = mapped_column(String(180))
+    kind: Mapped[str] = mapped_column(String(30), default="mcp")  # "mcp" | "api_key"
+    base_url: Mapped[str] = mapped_column(String(500), default="")
+    encrypted_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_catalog: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    server_info: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="untested")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class AuditEvent(Base):

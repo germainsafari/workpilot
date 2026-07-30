@@ -47,15 +47,43 @@ class AITaskStep(BaseStep):
 
 
 class ToolStep(BaseStep):
+    """A step that reaches a third-party system.
+
+    ``connection_id`` + ``tool_name`` are what make the call real: when both are
+    set the executor resolves the tenant's stored credential and invokes that
+    tool over MCP. Without them the step can only report that it was prepared,
+    which is how every step behaved before connections existed.
+
+    ``mode`` drives the safety policy, not ``dry_run``: reads always execute,
+    writes are refused unless ``WORKPILOT_ALLOW_TOOL_WRITES`` is enabled.
+
+    ``arguments`` values may reference earlier step output with ``{{ref}}``
+    templates, e.g. ``{"project_id": "{{fetchProjects.projects.0.id}}"}``.
+    """
+
     type: Literal["tool"]
-    operation: Literal["prepare_tasks", "prepare_message", "update_record"]
+    # Free-form since 0.2: the Phase-1 enum (prepare_tasks / prepare_message /
+    # update_record) had no read verb, so "fetch Scoro projects" had nowhere to
+    # go. Old stored definitions still validate.
+    operation: str = Field(default="fetch_records", max_length=80)
     dry_run: bool = True
+    connection_id: str | None = None
+    tool_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["read", "write"] = "read"
+
+    @property
+    def is_bound(self) -> bool:
+        """True when this step names a real connection and tool to call."""
+        return bool(self.connection_id and self.tool_name)
 
 
 class ConditionStep(BaseStep):
     type: Literal["condition"]
     field: str
-    operator: Literal["equals", "not_equals", "is_empty", "is_not_empty"] = "equals"
+    operator: Literal[
+        "equals", "not_equals", "is_empty", "is_not_empty", "contains"
+    ] = "equals"
     value: Any = None
 
 
@@ -206,6 +234,135 @@ class RunRead(BaseModel):
     @field_serializer("started_at", "finished_at")
     def serialize_run_dt(self, value: datetime | None) -> str | None:
         return utc_iso(value)
+
+
+class ConnectionToolRead(BaseModel):
+    """One tool discovered on a connected server."""
+
+    name: str
+    description: str = ""
+    read_only: bool = True
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    connector_id: str = Field(default="custom", max_length=80)
+    kind: Literal["mcp", "api_key"] = "mcp"
+    base_url: str = Field(min_length=4, max_length=500)
+    # Write-only: accepted on input, never echoed back in any response.
+    token: str | None = Field(default=None, max_length=4000)
+
+
+class ConnectionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    base_url: str | None = Field(default=None, min_length=4, max_length=500)
+    token: str | None = Field(default=None, max_length=4000)
+
+
+class ConnectionRead(BaseModel):
+    """A connection as returned to clients — never includes the credential."""
+
+    id: str
+    connector_id: str
+    name: str
+    kind: str
+    base_url: str
+    status: str
+    has_token: bool
+    token_hint: str = ""
+    tools: list[ConnectionToolRead] = Field(default_factory=list)
+    server_info: dict[str, Any] = Field(default_factory=dict)
+    last_error: str | None = None
+    last_checked_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("last_checked_at", "created_at", "updated_at")
+    def serialize_connection_dt(self, value: datetime | None) -> str | None:
+        return utc_iso(value)
+
+
+# The roles WorkPilot grants today. Kept as a Literal (not a free string) so an
+# unknown role is rejected at the edge rather than silently stored.
+TeamRole = Literal["workflow_admin", "workflow_builder", "approver", "operator", "viewer"]
+TeamMemberStatus = Literal["active", "invited", "suspended"]
+
+
+class TeamMemberRead(BaseModel):
+    """A person in the workspace — a row of ``users``, not a separate entity."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    email: str
+    name: str
+    # Free-form on read: seeded demo rows carry legacy roles ("finance_reviewer",
+    # "creative_lead") that predate the role enum, and hiding them behind a 500
+    # would be worse than showing them.
+    role: str
+    status: str
+    locale: str
+    timezone: str
+
+
+class TeamMemberCreate(BaseModel):
+    """An invitation. ``status`` is not accepted — invitees always start invited."""
+
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    name: str = Field(min_length=2, max_length=180)
+    role: TeamRole = "operator"
+
+
+class TeamMemberUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=180)
+    role: TeamRole | None = None
+    status: TeamMemberStatus | None = None
+
+
+class WorkspaceRead(BaseModel):
+    """The current tenant. ``slug`` is immutable — it appears in stored references."""
+
+    id: str
+    name: str
+    slug: str
+    plan: str
+    data_region: str
+    member_count: int
+    workflow_count: int
+
+
+class WorkspaceUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=180)
+
+
+class WorkspaceSettingsRead(BaseModel):
+    """Tenant settings merged over defaults.
+
+    ``allow_tool_writes`` is reported from the server's own configuration
+    (``WORKPILOT_ALLOW_TOOL_WRITES``), never from the tenant document — a
+    workspace admin must not be able to unlock live writes from the UI.
+    """
+
+    allow_tool_writes: bool
+    require_approval_for_writes: bool
+    max_run_cost_usd: float
+    data_region: str
+    notify_on_run_failure: bool
+    notify_on_approval_needed: bool
+    notify_email: str
+    retain_run_days: int
+
+
+class WorkspaceSettingsUpdate(BaseModel):
+    """Writable settings only. Unset fields keep their stored value."""
+
+    require_approval_for_writes: bool | None = None
+    max_run_cost_usd: float | None = Field(default=None, ge=0, le=1000)
+    data_region: str | None = Field(default=None, min_length=2, max_length=40)
+    notify_on_run_failure: bool | None = None
+    notify_on_approval_needed: bool | None = None
+    notify_email: str | None = Field(default=None, max_length=320)
+    retain_run_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class AuditRead(BaseModel):
