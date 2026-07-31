@@ -20,7 +20,13 @@ from app.authoring import (
 )
 from app.db import get_session
 from app.models import Workflow, WorkflowVersion
-from app.schemas import CanonicalWorkflow, WorkflowCreate, WorkflowRead, WorkflowUpdate
+from app.schemas import (
+    CanonicalWorkflow,
+    WorkflowCreate,
+    WorkflowDefinitionUpdate,
+    WorkflowRead,
+    WorkflowUpdate,
+)
 from app.users import ensure_principal_user
 
 router = APIRouter(prefix="/workflows", tags=["Workflows"])
@@ -154,6 +160,64 @@ async def update_workflow(
     workflow.updated_at = datetime.utcnow()
     await record_audit(
         session, principal, "workflow.updated", "workflow", workflow_id, {"fields": sorted(changes)}
+    )
+    await session.commit()
+    await session.refresh(workflow)
+    return workflow
+
+
+@router.put("/{workflow_id}/definition", response_model=WorkflowRead)
+async def update_workflow_definition(
+    workflow_id: str,
+    payload: WorkflowDefinitionUpdate,
+    principal: Principal = Depends(active_principal),
+    session: AsyncSession = Depends(get_session),
+) -> Workflow:
+    """Persist edits made in the workflow builder — adding a step, wiring a new
+    edge, binding a tool step to a connection.
+
+    Before this route existed, the builder's Save button only flipped a local
+    "saved" flag: nothing was sent to the server, so any change was lost on
+    reload and there was no way to ever grow a workflow past what it was
+    created with.
+
+    Follows the same immutable-version pattern as ``create_workflow``: this
+    writes a NEW ``WorkflowVersion`` rather than mutating the active one, so
+    past runs still resolve against the definition that actually produced
+    them.
+    """
+    workflow = await session.scalar(
+        select(Workflow)
+        .where(Workflow.id == workflow_id, Workflow.tenant_id == principal.tenant_id)
+        .options(selectinload(Workflow.versions))
+    )
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    current = next((v for v in workflow.versions if v.id == workflow.active_version_id), None)
+    next_number = (current.version_number + 1) if current else 1
+
+    version_id = f"version-{uuid4()}"
+    version = WorkflowVersion(
+        id=version_id,
+        workflow_id=workflow_id,
+        version_number=next_number,
+        canonical_definition=payload.definition.model_dump(by_alias=True),
+        generated_explanation=explanation_for(payload.definition),
+        validation_result={"valid": True, "errors": []},
+        runtime_plan={"primary_runtime": "native", "safe_test": True},
+        created_by=principal.user_id,
+    )
+    session.add(version)
+    workflow.active_version_id = version_id
+    workflow.updated_at = datetime.utcnow()
+    await record_audit(
+        session,
+        principal,
+        "workflow.definition_updated",
+        "workflow",
+        workflow_id,
+        {"version_id": version_id, "version_number": next_number, "steps": len(payload.definition.steps)},
     )
     await session.commit()
     await session.refresh(workflow)

@@ -7,6 +7,18 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.workpilot_api.repository_url
 }
 
+output "ecr_web_repository_url" {
+  description = <<-EOT
+    ECR repository URL for the WorkPilot web (vinext/Next.js) image.
+
+    Build with --build-arg NEXT_PUBLIC_CONTROL_PLANE_URL=http://<alb_dns_name>
+    (see the alb_dns_name output) so the browser calls the API through the ALB.
+    That value bakes into the client bundle at build time, which is why it
+    cannot simply be an environment variable on the running container.
+  EOT
+  value       = aws_ecr_repository.workpilot_web.repository_url
+}
+
 output "ecs_cluster_name" {
   description = "Name of the ECS cluster"
   value       = aws_ecs_cluster.main.name

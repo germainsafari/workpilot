@@ -29,6 +29,7 @@ from datetime import date
 from typing import Any, Protocol
 
 from app.executor import DeterministicMockModel
+from app.metrics import emit_model_metrics
 from app.runtimes.base import AgentRuntime
 from app.schemas import AITaskStep
 
@@ -322,6 +323,15 @@ class BedrockLangGraphRuntime(AgentRuntime):
                 "Generated without a model: Bedrock credentials are not configured."
             )
             usage["degraded"] = True
+            emit_model_metrics(
+                provider="deterministic_mock",
+                model_id=self._model_id,
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=0.0,
+                duration_ms=0.0,
+                degraded=True,
+            )
             return output, usage
 
     @staticmethod
@@ -378,8 +388,12 @@ class BedrockLangGraphRuntime(AgentRuntime):
         self, step: AITaskStep, input_data: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         # Lazy imports so the module imports fine without langchain installed.
+        import time
+
         from langchain_aws import ChatBedrockConverse
         from langgraph.prebuilt import create_react_agent
+
+        started = time.monotonic()
 
         task = step.task
         system_prompt = _TASK_SYSTEM_PROMPTS.get(task, _DEFAULT_PROMPT)
@@ -461,4 +475,13 @@ class BedrockLangGraphRuntime(AgentRuntime):
         }
         if tool_calls:
             model_usage["tools_called"] = tool_calls
+
+        emit_model_metrics(
+            provider="bedrock_langgraph",
+            model_id=self._model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
         return output_data, model_usage

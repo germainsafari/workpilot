@@ -30,6 +30,7 @@ from app.config import get_settings
 from app.connectors import RestToolError, get_rest_connector
 from app.crypto import CredentialEncryptionError, decrypt_secret
 from app.mcp import McpAuthError, McpClient, McpError
+from app.metrics import emit_tool_call_metrics
 from app.models import Connection
 from app.schemas import ToolStep
 
@@ -283,6 +284,9 @@ class McpToolInvoker:
         if not step.is_bound:
             # Unbound step: nothing to call. Say so plainly rather than
             # reporting a fake success, which is what used to happen.
+            emit_tool_call_metrics(
+                tool_name=step.tool_name or "unbound", connector_id="none", invoked=False
+            )
             return (
                 {
                     "status": "not_configured",
@@ -328,10 +332,23 @@ class McpToolInvoker:
         try:
             result = await self._dispatch(connection, step.tool_name or "", arguments)
         except (McpError, RestToolError) as exc:
+            emit_tool_call_metrics(
+                tool_name=step.tool_name or "unknown",
+                connector_id=connection.connector_id,
+                invoked=True,
+                duration_ms=(time.monotonic() - started) * 1000,
+                error=True,
+            )
             raise ToolInvocationError(
                 f"{connection.name} · {step.tool_name}: {exc}"
             ) from exc
         duration_ms = int((time.monotonic() - started) * 1000)
+        emit_tool_call_metrics(
+            tool_name=step.tool_name or "unknown",
+            connector_id=connection.connector_id,
+            invoked=True,
+            duration_ms=duration_ms,
+        )
 
         tool_usage = {
             "invoked": True,

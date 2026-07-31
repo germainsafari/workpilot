@@ -230,6 +230,9 @@ export function apiDetailToEditorDefinition(detail: ApiWorkflowDetail) {
                 ? "Pauses until a condition is met."
                 : "Workflow complete.",
       position: { x: 280 + index * 260, y: 150 },
+      // Preserve everything the backend sent (connection_id, tool_name,
+      // arguments, task, mode, …) so a later save doesn't erase it.
+      raw: step,
     })),
   ];
 
@@ -244,4 +247,83 @@ export function apiDetailToEditorDefinition(detail: ApiWorkflowDetail) {
   ];
 
   return { steps: uiSteps, edges };
+}
+
+/** Minimal, schema-valid defaults for a step type with no prior canonical data. */
+function defaultRawStep(type: string): Record<string, unknown> {
+  switch (type) {
+    case "tool":
+      // connection_id/tool_name deliberately absent: the executor reports
+      // "not_configured" for an unbound tool step rather than faking success,
+      // so an unbound step is safe to save and run.
+      return { type: "tool", operation: "fetch_records", mode: "read", dry_run: true };
+    case "ai_task":
+      return { type: "ai_task", task: "extract" };
+    case "condition":
+      return { type: "condition", field: "status", operator: "equals", value: null };
+    case "wait":
+      return { type: "wait", duration_seconds: 0 };
+    case "end":
+      return { type: "end", outcome: "completed" };
+    default:
+      // "approval" is a builder-only concept the backend schema has no type
+      // for (only ai_task | tool | condition | wait | end exist) — save it as
+      // a wait step, the closest real analog to "pause here".
+      return { type: "wait", duration_seconds: 0 };
+  }
+}
+
+export interface EditorFlowNode {
+  id: string;
+  data: { label: string; summary: string; stepType: string; raw?: Record<string, unknown> };
+}
+
+export interface EditorFlowEdge {
+  source: string;
+  target: string;
+  // React Flow's own Edge.label is ReactNode | null; only a plain string is
+  // ever meaningful here, so anything else is treated as "no label".
+  label?: unknown;
+}
+
+/**
+ * Reverse of {@link apiDetailToEditorDefinition}: turn what the builder has on
+ * screen back into the canonical shape `PUT /v1/workflows/{id}/definition`
+ * expects. Drops the synthetic "trigger" node the editor overlays for display
+ * — the canonical schema has no step for it — and rewires any edge that
+ * pointed at it onto the first real step instead.
+ */
+export function editorDefinitionToApi(
+  nodes: EditorFlowNode[],
+  edges: EditorFlowEdge[],
+  trigger: { type: string; label: string },
+): CanonicalDefinition {
+  const realNodes = nodes.filter((n) => n.id !== "trigger");
+  const firstRealId = realNodes[0]?.id;
+
+  const steps = realNodes.map((n) => {
+    const base = n.data.raw ? { ...n.data.raw } : defaultRawStep(n.data.stepType);
+    return { ...base, id: n.id, name: n.data.label };
+  });
+
+  const seen = new Set<string>();
+  const outEdges: Array<{ from: string; to: string; label?: string }> = [];
+  for (const e of edges) {
+    const from = e.source === "trigger" ? firstRealId : e.source;
+    const to = e.target === "trigger" ? firstRealId : e.target;
+    if (!from || !to || from === to) continue;
+    const key = `${from}->${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = typeof e.label === "string" ? e.label : undefined;
+    outEdges.push(label ? { from, to, label } : { from, to });
+  }
+
+  return {
+    apiVersion: "workpilot.io/v1",
+    kind: "Workflow",
+    trigger,
+    steps,
+    edges: outEdges,
+  };
 }

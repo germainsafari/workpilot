@@ -59,16 +59,18 @@ import {
   formatDuration,
   formatRelativeTime,
   parseApiDate,
+  type ApiAvailableTool,
   type ApiRun,
   type ApiStepRun,
 } from "../../../lib/api";
 import type { StepType, WorkflowSummary } from "../../../lib/types";
 import { StatusPill } from "../../components/StatusPill";
+import { editorDefinitionToApi } from "../../../lib/workflow-draft";
 
 /** A run in one of these states will not change again, so polling can stop. */
 const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled", "stopped"]);
 
-type FlowData = { label: string; summary: string; stepType: StepType };
+type FlowData = { label: string; summary: string; stepType: StepType; raw?: Record<string, unknown> };
 type FlowNode = Node<FlowData>;
 
 const stepIcon = (type: StepType, size = 16) => {
@@ -88,7 +90,7 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
     id: step.id,
     type: "default",
     position: step.position,
-    data: { label: step.name, summary: step.summary, stepType: step.type },
+    data: { label: step.name, summary: step.summary, stepType: step.type, raw: step.raw },
     className: `flow-node flow-${step.type}`,
   })), [workflow.definition.steps]);
   const initialEdges = useMemo<Edge[]>(() => workflow.definition.edges.map((edge) => ({
@@ -108,6 +110,8 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
   const [selected, setSelected] = useState<FlowNode | null>(initialNodes[1] ?? null);
   const [tab, setTab] = useState<"build" | "explain" | "activity">("build");
   const [saved, setSaved] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [published, setPublished] = useState(workflow.status === "active");
   const [publishing, setPublishing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -154,9 +158,43 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
   const addStep = (type: StepType) => {
     stepSequence.current += 1;
     const id = `new-step-${stepSequence.current}`;
-    setNodes((cur) => [...cur, { id, position: { x: 900, y: 450 }, className: `flow-node flow-${type}`, data: { label: labelForStep(type), summary: "Select this step to describe what it should do.", stepType: type } }]);
+    // Place near the selected node (or the rightmost node) and wire an edge
+    // into it automatically — a step with no edges is invisible progress: it
+    // exists in state but looks like nothing happened, and the graph
+    // validator on save rejects an unreachable step anyway.
+    const anchor = selected ?? nodes[nodes.length - 1];
+    const position = anchor
+      ? { x: anchor.position.x + 260, y: anchor.position.y }
+      : { x: 280, y: 150 };
+    setNodes((cur) => [
+      ...cur,
+      {
+        id,
+        position,
+        className: `flow-node flow-${type}`,
+        data: { label: labelForStep(type), summary: "Select this step to describe what it should do.", stepType: type },
+      },
+    ]);
+    if (anchor) {
+      setEdges((cur) => [...cur, { id: `e-${anchor.id}-${id}`, source: anchor.id, target: id, type: "smoothstep", className: "flow-edge" }]);
+    }
     setSaved(false);
     setAddOpen(false);
+  };
+
+  /** Persist the current canvas — steps, edges, and any tool bindings — as a new version. */
+  const saveWorkflow = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const definition = editorDefinitionToApi(nodes, edges, workflow.definition.trigger);
+      await api.workflows.saveDefinition(workflow.id, definition);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save this workflow.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   /**
@@ -270,13 +308,24 @@ function WorkflowEditorInner({ workflow }: { workflow: WorkflowSummary }) {
               <span className="toolbar-separator" />
               <button className="icon-button" aria-label="Undo"><Undo2 size={17} /></button>
               <button className="icon-button" aria-label="Redo"><RotateCcw size={17} /></button>
-              <button className="secondary-button small-button" onClick={() => setSaved(true)} disabled={saved}><Save size={15} />Save</button>
+              <button className="secondary-button small-button" onClick={saveWorkflow} disabled={saved || saving}>
+                {saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
+                {saving ? "Saving…" : "Save"}
+              </button>
+              {saveError && <span style={{ color: "var(--danger)", fontSize: 12, marginLeft: 8 }}>{saveError}</span>}
             </Panel>
           </ReactFlow>
           <div className="canvas-legend"><span><b className="legend-dot reasoning" />AI-assisted</span><span><b className="legend-dot deterministic" />Fixed rule</span><span><b className="legend-dot approval" />Human approval</span></div>
         </div>
         <aside className="configuration-panel">
-          {selected ? <StepConfiguration node={selected} stepRun={stepRunFor(selected.id)} runStatus={runForSteps?.status ?? null} onClose={() => setSelected(null)} onChange={(label) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, label } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, label } } : null); setSaved(false); }} /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and what it did on the last run.</p></div>}
+          {selected ? <StepConfiguration
+            node={selected}
+            stepRun={stepRunFor(selected.id)}
+            runStatus={runForSteps?.status ?? null}
+            onClose={() => setSelected(null)}
+            onChange={(label) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, label } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, label } } : null); setSaved(false); }}
+            onRawChange={(raw) => { setNodes((cur) => cur.map((n) => n.id === selected.id ? { ...n, data: { ...n.data, raw } } : n)); setSelected((cur) => cur ? { ...cur, data: { ...cur.data, raw } } : null); setSaved(false); }}
+          /> : <div className="panel-empty"><ListChecks size={28} /><h3>Select a step</h3><p>Choose a step on the canvas to review its purpose and what it did on the last run.</p></div>}
         </aside>
       </div>}
 
@@ -430,12 +479,121 @@ function StepActivity({ stepRun, runStatus }: { stepRun: ApiStepRun | null; runS
   );
 }
 
-function StepConfiguration({ node, stepRun, runStatus, onClose, onChange }: {
+/**
+ * Bind a `tool`-type step to a real connection + tool.
+ *
+ * Before this existed, a tool step's connection/tool could only ever be set at
+ * creation time (by the NL compiler or a template) — there was no way to look
+ * at "Fetch Scoro projects" in the builder and actually point it at Scoro. It
+ * would run forever as `not_configured`.
+ */
+function ToolBinding({ raw, onChange }: { raw: Record<string, unknown>; onChange: (raw: Record<string, unknown>) => void }) {
+  const [tools, setTools] = useState<ApiAvailableTool[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.connections.tools()
+      .then((t) => { if (!cancelled) setTools(t); })
+      .catch((err) => { if (!cancelled) setLoadError(err instanceof Error ? err.message : "Could not load connections."); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const connectionId = typeof raw.connection_id === "string" ? raw.connection_id : "";
+  const toolName = typeof raw.tool_name === "string" ? raw.tool_name : "";
+  const argsText = raw.arguments && typeof raw.arguments === "object"
+    ? JSON.stringify(raw.arguments, null, 2)
+    : "{}";
+  const [argsDraft, setArgsDraft] = useState(argsText);
+  const [argsError, setArgsError] = useState<string | null>(null);
+
+  const byConnection = new Map<string, { name: string; tools: ApiAvailableTool[] }>();
+  for (const t of tools ?? []) {
+    const entry = byConnection.get(t.connection_id) ?? { name: t.connection_name, tools: [] };
+    entry.tools.push(t);
+    byConnection.set(t.connection_id, entry);
+  }
+  const selectedTool = (tools ?? []).find((t) => t.connection_id === connectionId && t.tool_name === toolName);
+
+  const applyArgs = () => {
+    try {
+      const parsed = argsText.trim() ? JSON.parse(argsDraft) : {};
+      setArgsError(null);
+      onChange({ ...raw, arguments: parsed });
+    } catch {
+      setArgsError("Not valid JSON — using the last saved value instead.");
+    }
+  };
+
+  return (
+    <div className="config-section">
+      <h3><Cable size={16} />Connect to a tool</h3>
+      {loadError && <p style={{ color: "var(--danger)" }}>{loadError}</p>}
+      {!loadError && tools === null && <p>Loading your connections…</p>}
+      {!loadError && tools !== null && tools.length === 0 && (
+        <p>No connections yet. Add one on the <strong>Connections</strong> page, then come back here.</p>
+      )}
+      {!loadError && tools !== null && tools.length > 0 && (
+        <>
+          <label className="form-field">
+            <span>Connection</span>
+            <select
+              className="select-field"
+              value={connectionId}
+              onChange={(e) => onChange({ ...raw, connection_id: e.target.value, tool_name: "" })}
+            >
+              <option value="">Not connected</option>
+              {[...byConnection.entries()].map(([id, entry]) => (
+                <option key={id} value={id}>{entry.name}</option>
+              ))}
+            </select>
+          </label>
+          {connectionId && (
+            <label className="form-field">
+              <span>Tool</span>
+              <select
+                className="select-field"
+                value={toolName}
+                onChange={(e) => onChange({ ...raw, tool_name: e.target.value, mode: "read" })}
+              >
+                <option value="">Choose a tool…</option>
+                {(byConnection.get(connectionId)?.tools ?? []).map((t) => (
+                  <option key={t.tool_name} value={t.tool_name} disabled={!t.read_only}>
+                    {t.tool_name}{t.read_only ? "" : " (write — blocked, read-only mode)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {selectedTool && (
+            <>
+              <p style={{ color: "var(--muted)", fontSize: 11 }}>{selectedTool.description}</p>
+              <label className="form-field">
+                <span>Arguments (JSON — use {"{{stepId.field}}"} to reference an earlier step)</span>
+                <textarea
+                  className="select-field"
+                  style={{ fontFamily: "monospace", fontSize: 11, minHeight: 80, resize: "vertical" }}
+                  value={argsDraft}
+                  onChange={(e) => setArgsDraft(e.target.value)}
+                  onBlur={applyArgs}
+                />
+              </label>
+              {argsError && <p style={{ color: "var(--danger)", fontSize: 11 }}>{argsError}</p>}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function StepConfiguration({ node, stepRun, runStatus, onClose, onChange, onRawChange }: {
   node: FlowNode;
   stepRun: ApiStepRun | null;
   runStatus: string | null;
   onClose: () => void;
   onChange: (label: string) => void;
+  onRawChange: (raw: Record<string, unknown>) => void;
 }) {
   return <>
     <div className="config-head"><div className={`config-icon config-${node.data.stepType}`}>{stepIcon(node.data.stepType, 18)}</div><div><small>{labelForStep(node.data.stepType)}</small><h2>{node.data.label}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close step settings"><X size={17} /></button></div>
@@ -445,6 +603,7 @@ function StepConfiguration({ node, stepRun, runStatus, onClose, onChange }: {
 
       <StepActivity stepRun={stepRun} runStatus={runStatus} />
 
+      {node.data.stepType === "tool" && <ToolBinding raw={node.data.raw ?? {}} onChange={onRawChange} />}
       {node.data.stepType === "ai_task" && <div className="config-section"><h3><Bot size={16} />How WorkPilot helps</h3><p>A model reads this step&apos;s input and returns a structured result. It may call read-only tools on your connected systems, and cannot modify any external record.</p><span className="safety-chip"><ShieldCheck size={14} />Structured result required</span></div>}
       {node.data.stepType === "approval" && <><label className="form-field"><span>Who reviews it?</span><button className="select-field">Account manager <ChevronDown size={15} /></button></label><div className="config-section approval-rule"><h3><LockKeyhole size={16} />Approval rule</h3><p>The workflow pauses here. Later actions cannot run until the assigned reviewer approves.</p></div></>}
       <div className="config-section"><h3><AlertTriangle size={16} />If this step fails</h3><p>The run stops and records the error. Nothing further executes.</p></div>

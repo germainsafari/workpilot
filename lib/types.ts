@@ -13,6 +13,15 @@ export interface WorkflowStep {
   type: StepType;
   summary: string;
   position: { x: number; y: number };
+  /**
+   * Every field the backend's canonical step carries beyond id/name/type —
+   * `operation`, `connection_id`, `tool_name`, `arguments`, `mode`, `task`,
+   * `output_schema`, condition/wait/end fields. The editor used to discard all
+   * of this on read, so saving a workflow back would have silently erased any
+   * tool binding a step already had. Passed straight through, untyped, because
+   * the canonical shape is a discriminated union owned by the backend.
+   */
+  raw?: Record<string, unknown>;
 }
 
 export interface WorkflowEdge {

@@ -163,6 +163,12 @@ class WorkflowUpdate(BaseModel):
     status: Literal["draft", "active", "paused"] | None = None
 
 
+class WorkflowDefinitionUpdate(BaseModel):
+    """Body for saving edits made in the workflow builder (steps/edges)."""
+
+    definition: CanonicalWorkflow
+
+
 class WorkflowRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str

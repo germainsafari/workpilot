@@ -25,14 +25,18 @@ backwards compatibility with condition steps that reference a bare field name.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from app.schemas import AITaskStep, CanonicalWorkflow, ConditionStep, EndStep, ToolStep, WaitStep
+from app.telemetry import get_tracer
 
 if TYPE_CHECKING:
     from app.runtimes.base import AgentRuntime
     from app.tool_invoker import ToolInvoker
+
+tracer = get_tracer("workpilot.executor")
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -122,44 +126,67 @@ class NativeExecutor:
             model_usage: dict[str, Any] = {}
             tool_usage: dict[str, Any] = {}
 
-            if isinstance(step, AITaskStep):
-                if self._runtime is not None:
-                    output, model_usage = await self._runtime.execute(step, step_input)
-                else:
-                    output, model_usage = await self.model.execute(step, step_input)
-            elif isinstance(step, ToolStep):
-                output, tool_usage = await self._tool_invoker.invoke(step, step_input)
-            elif isinstance(step, ConditionStep):
-                actual: Any = context
-                for part in step.field.replace("[", ".").replace("]", "").split("."):
-                    if not part:
-                        continue
-                    if isinstance(actual, dict):
-                        actual = actual.get(part)
-                    elif isinstance(actual, (list, tuple)) and part.isdigit() and int(part) < len(actual):
-                        actual = actual[int(part)]
+            # A span per step is what turns "a run happened" into a real trace:
+            # every step shows up as its own timed span under the run span
+            # started in run_service.py, so a slow or failing step is visible
+            # without reading logs.
+            step_span_ctx = tracer.start_as_current_span(
+                f"step.{step.type}",
+                attributes={"workpilot.step_id": step.id, "workpilot.step_type": step.type},
+            )
+            step_started = time.monotonic()
+
+            with step_span_ctx as step_span:
+                if isinstance(step, AITaskStep):
+                    if self._runtime is not None:
+                        output, model_usage = await self._runtime.execute(step, step_input)
                     else:
-                        actual = None
-                        break
-                if step.operator == "equals":
-                    matched = actual == step.value
-                elif step.operator == "not_equals":
-                    matched = actual != step.value
-                elif step.operator == "is_empty":
-                    matched = actual in (None, "", [], {})
-                elif step.operator == "contains":
-                    try:
-                        matched = step.value in actual
-                    except (TypeError, ValueError):
-                        matched = False
-                else:
-                    matched = actual not in (None, "", [], {})
-                output = {"condition_matched": matched, "actual": actual, "operator": step.operator}
-            elif isinstance(step, WaitStep):
-                await asyncio.sleep(min(step.duration_seconds, 1) * 0.01)
-                output = {"waited_seconds": step.duration_seconds, "simulated": True}
-            elif isinstance(step, EndStep):
-                output = {"outcome": step.outcome}
+                        output, model_usage = await self.model.execute(step, step_input)
+                    if model_usage:
+                        provider = str(model_usage.get("provider", ""))
+                        cost = float(model_usage.get("cost_usd") or 0)
+                        step_span.set_attribute("workpilot.model.provider", provider)
+                        step_span.set_attribute("workpilot.model.cost_usd", cost)
+                elif isinstance(step, ToolStep):
+                    output, tool_usage = await self._tool_invoker.invoke(step, step_input)
+                    if tool_usage:
+                        step_span.set_attribute("workpilot.tool.invoked", bool(tool_usage.get("invoked")))
+                        step_span.set_attribute("workpilot.tool.name", str(tool_usage.get("tool_name", "")))
+                elif isinstance(step, ConditionStep):
+                    actual: Any = context
+                    for part in step.field.replace("[", ".").replace("]", "").split("."):
+                        if not part:
+                            continue
+                        if isinstance(actual, dict):
+                            actual = actual.get(part)
+                        elif isinstance(actual, (list, tuple)) and part.isdigit() and int(part) < len(actual):
+                            actual = actual[int(part)]
+                        else:
+                            actual = None
+                            break
+                    if step.operator == "equals":
+                        matched = actual == step.value
+                    elif step.operator == "not_equals":
+                        matched = actual != step.value
+                    elif step.operator == "is_empty":
+                        matched = actual in (None, "", [], {})
+                    elif step.operator == "contains":
+                        try:
+                            matched = step.value in actual
+                        except (TypeError, ValueError):
+                            matched = False
+                    else:
+                        matched = actual not in (None, "", [], {})
+                    output = {"condition_matched": matched, "actual": actual, "operator": step.operator}
+                elif isinstance(step, WaitStep):
+                    await asyncio.sleep(min(step.duration_seconds, 1) * 0.01)
+                    output = {"waited_seconds": step.duration_seconds, "simulated": True}
+                elif isinstance(step, EndStep):
+                    output = {"outcome": step.outcome}
+
+                step_span.set_attribute(
+                    "workpilot.step.duration_ms", int((time.monotonic() - step_started) * 1000)
+                )
 
             results.append(
                 StepResult(

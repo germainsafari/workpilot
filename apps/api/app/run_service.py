@@ -10,6 +10,7 @@ It is called two ways (see ``api/runs.py``):
 * by the Redis worker (``app.worker``) when runs are queued (docker/production).
 """
 
+import time
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -21,6 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.audit import record_audit
 from app.auth import Principal
 from app.executor import NativeExecutor
+from app.metrics import emit_run_metrics
 from app.models import StepRun, Workflow, WorkflowRun, WorkflowVersion
 from app.runtimes.base import AgentRuntime
 from app.runtimes.factory import get_runtime
@@ -100,6 +102,7 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
             raise LookupError("workflow version not found")
 
         run.status = "running"
+        run_started = time.monotonic()
         definition = CanonicalWorkflow.model_validate(version.canonical_definition)
         try:
             # The invoker holds one MCP session per connection for the whole run
@@ -151,6 +154,13 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
             run.current_step_id = None
             span.set_attribute("workpilot.run.status", "completed")
             span.set_attribute("workpilot.run.steps", len(results))
+            emit_run_metrics(
+                workflow_id=run.workflow_id,
+                status="completed",
+                duration_ms=(time.monotonic() - run_started) * 1000,
+                cost_usd=total_cost,
+                token_usage=total_tokens,
+            )
             await record_audit(
                 session, principal, "run.completed", "workflow_run", run.id, {"steps": len(results)}
             )
@@ -168,6 +178,13 @@ async def execute_persisted_run(session: AsyncSession, principal: Principal, run
             run.status = "failed"
             run.finished_at = datetime.utcnow()
             run.error_summary = str(error)
+            emit_run_metrics(
+                workflow_id=run.workflow_id,
+                status="failed",
+                duration_ms=(time.monotonic() - run_started) * 1000,
+                cost_usd=0.0,
+                token_usage=0,
+            )
             await record_audit(
                 session, principal, "run.failed", "workflow_run", run.id, {"error_type": type(error).__name__}
             )

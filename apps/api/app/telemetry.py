@@ -74,11 +74,10 @@ def configure_telemetry() -> None:
     try:
         _setup_otel(settings)
     except ImportError as exc:
-        logger.warning(
-            "OpenTelemetry packages unavailable — tracing disabled. "
-            "Install workpilot-api[otel] to enable. Error: %s",
-            exc,
-        )
+        print(f"OpenTelemetry packages unavailable — tracing disabled. Error: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive: a bad OTel config
+        # must disable tracing, never take the API down with it.
+        print(f"OpenTelemetry setup failed ({type(exc).__name__}: {exc}) — tracing disabled.")
 
 
 def _setup_otel(settings: Any) -> None:  # noqa: ANN401 — Any used for Settings to avoid circular import typing
@@ -105,7 +104,14 @@ def _setup_otel(settings: Any) -> None:  # noqa: ANN401 — Any used for Setting
         id_generator=AwsXRayIdGenerator(),
     )
 
-    exporter = OTLPSpanExporter(endpoint=settings.otel_exporter_endpoint)
+    # insecure=True: the ADOT collector sidecar listens on plain gRPC
+    # (localhost:4317, no TLS) — it's a same-task, same-network-namespace
+    # sidecar, not a public endpoint. Without this the exporter defaults to a
+    # TLS channel, every export attempt fails the handshake, and
+    # BatchSpanProcessor swallows that failure at debug level — no crash, no
+    # warning, spans just never leave the process. That silent-failure shape is
+    # exactly what made this look like tracing was "on" but producing nothing.
+    exporter = OTLPSpanExporter(endpoint=settings.otel_exporter_endpoint, insecure=True)
     provider.add_span_processor(BatchSpanProcessor(exporter))
 
     trace.set_tracer_provider(provider)
@@ -119,10 +125,11 @@ def _setup_otel(settings: Any) -> None:  # noqa: ANN401 — Any used for Setting
 
     SQLAlchemyInstrumentor().instrument(engine=_async_engine.sync_engine)
 
-    logger.info(
-        "OpenTelemetry configured — exporting to %s",
-        settings.otel_exporter_endpoint,
-    )
+    # print(), not logger.info(): this codebase's logging is structlog-driven
+    # and the stdlib `logging` calls in this module are not guaranteed to reach
+    # a configured handler, which is exactly why this misconfiguration went
+    # unnoticed — nothing surfaced in CloudWatch Logs either way.
+    print(f"OpenTelemetry configured — exporting to {settings.otel_exporter_endpoint} (insecure gRPC)")
 
 
 def instrument_fastapi(app: Any) -> None:  # noqa: ANN401

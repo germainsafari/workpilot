@@ -33,6 +33,18 @@ variable "api_desired_count" {
   default     = 1
 }
 
+variable "web_cpu" {
+  description = "vCPU units added to the shared task for the web (vinext/Next.js) container"
+  type        = number
+  default     = 512
+}
+
+variable "web_memory" {
+  description = "Memory (MiB) added to the shared task for the web container"
+  type        = number
+  default     = 1024
+}
+
 variable "certificate_arn" {
   description = "ACM certificate ARN for the HTTPS listener. Leave empty to skip HTTPS."
   type        = string

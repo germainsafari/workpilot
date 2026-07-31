@@ -343,6 +343,15 @@ export const api = {
       apiFetch("/v1/workflows", { method: "POST", body: JSON.stringify(payload) }),
     updateStatus: (id: string, status: "active" | "draft" | "paused"): Promise<ApiWorkflow> =>
       apiFetch(`/v1/workflows/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+    /** Persist builder edits (added/renamed steps, rewired edges, tool bindings). */
+    saveDefinition: (
+      id: string,
+      definition: import("./workflow-draft").CanonicalDefinition,
+    ): Promise<ApiWorkflow> =>
+      apiFetch(`/v1/workflows/${id}/definition`, {
+        method: "PUT",
+        body: JSON.stringify({ definition }),
+      }),
     compile: async (description: string): Promise<ApiCompileResponse> => {
       try {
         return await apiFetch("/v1/workflows/compile", {
